@@ -1,0 +1,21 @@
+# Nunca subir datos ni código del juego (repo público)
+*.3ds
+*.cci
+*.cia
+*.cxi
+*.7z
+*.so
+*.ctxb
+*.bcmdl
+*.gar
+romfs.patch
+title.so
+game.3ds
+sysdata/
+vertex/
+build/
+work/
+runs/
+rom/
+*.bmp
+*.log
