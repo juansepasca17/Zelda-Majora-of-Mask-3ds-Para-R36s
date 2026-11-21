@@ -19,6 +19,15 @@ piece  264 184  56  56    584 432  48  48
 tap L2 292 28
 tap R2 292 212
 
+# Puntos beige de los marcos de I, II y la columna izquierda mientras se juega. Si la pantalla
+# de abajo muestra otra cosa (título "Oprime Start", selección de archivo, menús) el motor pone
+# las dos pantallas solo, hasta que vuelve el HUD. Negro (escenas) sigue en una pantalla.
+check 268   8 239 231 214
+check 268 192 239 231 222
+check 316   8 239 231 222
+check   4 192 239 231 214
+check  52 192 239 231 222
+
 # Select: ver la pantalla de abajo completa (máscaras, objetos, mapa) y volver.
 # Ahí el stick derecho mueve el cursor y R2 toca o arrastra.
 swap SELECT

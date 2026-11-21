@@ -33,4 +33,30 @@
 - Consola (`mm3d-v2-a`): 91 % de media (igual que v1), Termina 111–129 %, bosque 66–87 %,
   0 omitidos, sin avisos nuevos, ~270 MiB. Instalada: motor nuevo (respaldo `pocket-native.fix8`),
   `hud.txt`, TopOnly (respaldo de los ajustes en `settings.toml.bak`).
-- Falta: que el usuario juegue (L2/R2 → I/II, Select, arrastrar máscaras, cámara con el stick derecho).
+- Controles pendientes de confirmar jugando: L2/R2 → I/II, Select, arrastrar máscaras, cámara con el stick derecho.
+
+## 2026-11-21 — primera partida del usuario y v3
+
+- Partida de ~28 min (`mm3d-play-01`). Lo bueno: corre bien en juego. Lo malo:
+  - Título y selección de archivo "semirecortados": en Majora están en la **pantalla de abajo**, y el modo
+    de una pantalla solo mostraba los recortes del HUD.
+  - Fondos y personajes que faltan, parpadeos y negro en las escenas del título: casi todos los modelos usan un
+    sombreado de vértices de 495 instrucciones (3 968 líneas de GLSL) y **cada combinación con un material
+    nuevo tarda ~3,3 s en enlazarse en Mali**. 250 programas en la partida; mientras se enlazan, esos dibujos
+    no salen. Los programas enlazados se guardan en `~/.cache/zakuro/gles/*.bin` (40 MB), así que la segunda
+    vez es mucho mejor.
+  - Pasados ~190 programas vivos, Mali rechaza enlaces con el log vacío (61 veces), la GPU queda al 17–19 %
+    y el hilo GL esperando el 77 %: velocidad 17–47 % al final. No es memoria del sistema (250 MiB libres,
+    swap zram sin usar).
+- A/B/C en la consola (`mm3d-shaders-01`, el mismo recorrido): actual 96 %, `separable_shaders` 77 %
+  (27 698 omitidos), `generic_shaders` 10 % (1 fps, cortado por tiempo). Se queda la actual.
+- v3 (motor):
+  - `check X Y R G B` en `hud.txt`: cada 15 presentaciones el hilo de la GPU lee la pantalla de abajo y la
+    clasifica (HUD si coinciden ≥75 % de los puntos, negro, o "otra cosa"). "Otra cosa" durante 0,3 s pone
+    las dos pantallas (BigTop) hasta que vuelve el HUD o el negro. Cursor oculto en esa vista salvo al moverlo.
+  - `ZAKURO_PROGRAM_CAP` (150 por defecto): con más programas vivos, se borran los usados hace más tiempo
+    hasta 3/4 del tope, nunca los del lote actual; vuelven desde la copia en disco. Estrés en el PC con tope 8:
+    272 recortes, 0 errores, imagen correcta.
+- Consola (`mm3d-v3-a`): 95 % de media, 0 omitidos; el log muestra negro → título (dos pantallas) → negro →
+  menú → negro → HUD. Instalada (respaldos `pocket-native.v2` y `pocket-native.fix8`).
+- Falta: una partida larga del usuario para confirmar que ya no hay rechazos de Mali.

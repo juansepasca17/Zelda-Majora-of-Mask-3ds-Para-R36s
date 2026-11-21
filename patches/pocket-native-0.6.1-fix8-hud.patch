@@ -59,7 +59,7 @@ index fda80fe..05cedb8 100644
      let _process = system.cpu.regs[1];
      let object = system.kernel.objects.insert(KObject::ResourceLimit);
 diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
-index dfab5f7..742edcd 100644
+index dfab5f7..c00191b 100644
 --- a/engine/core/src/lib.rs
 +++ b/engine/core/src/lib.rs
 @@ -180,6 +180,8 @@ pub struct System {
@@ -109,7 +109,31 @@ index dfab5f7..742edcd 100644
                  let image = match screen_ref(gpu, guest, screen, black) {
                      Some(found) => zakuro_gpu::PanelImage::Gpu(found),
                      None => zakuro_gpu::PanelImage::Pixels(screen_pixels(gpu, guest, screen, black), screen.width(), screen.height()),
-@@ -1259,6 +1275,31 @@ impl GpuMemory for GuestMemory<'_> {
+@@ -1170,6 +1186,23 @@ impl System {
+                 shown[index] = Some((image, area));
+             }
+             gpu.present_panel(shown, cursor, overlays, smooth, interpolate, frames);
++            // every 15th time, what the bottom screen shows, for the
++            // one-screen HUD to step aside for menus
++            static LOOKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++            if zakuro_gpu::hud_active() && LOOKED.fetch_add(1, Ordering::Relaxed).is_multiple_of(15) {
++                let checks = zakuro_gpu::hud_checks();
++                if !checks.is_empty() {
++                    match screen_ref(gpu, guest, zakuro_common::Screen::Bottom, black).and_then(|found| gpu.scaled_picture(found)) {
++                        Some((pixels, scale)) => {
++                            zakuro_gpu::note_hud_seen(&pixels, scale, &checks);
++                        }
++                        None => {
++                            let pixels = screen_pixels(gpu, guest, zakuro_common::Screen::Bottom, black);
++                            zakuro_gpu::note_hud_seen(&pixels, 1, &checks);
++                        }
++                    }
++                }
++            }
+             if let Some((presents, waiter)) = presents {
+                 if presents.fetch_sub(1, Ordering::SeqCst) == 1 {
+                     waiter.wake();
+@@ -1259,6 +1292,31 @@ impl GpuMemory for GuestMemory<'_> {
      }
  }
  
@@ -276,10 +300,10 @@ index f0695f6..ad848d4 100644
              // copying through a temporary keeps the borrow of title from
              // overlapping the mutable borrow of memory.
 diff --git a/engine/gpu/src/lib.rs b/engine/gpu/src/lib.rs
-index 935b8ba..4436f99 100644
+index 935b8ba..1e1df97 100644
 --- a/engine/gpu/src/lib.rs
 +++ b/engine/gpu/src/lib.rs
-@@ -22,6 +22,28 @@ pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
+@@ -22,6 +22,75 @@ pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
  #[cfg(feature = "gles")]
  pub use raster::gles::{compiling, compiling_stand_ins, preparing, skip_preparing, waited_draws, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
  
@@ -305,10 +329,57 @@ index 935b8ba..4436f99 100644
 +    HUD.read().is_ok_and(|hud| !hud.is_empty())
 +}
 +
++/// points of the bottom screen, x and y in its pixels, and the color each
++/// has while it shows the game's HUD, for telling that apart from menus.
++static HUD_CHECKS: std::sync::RwLock<Vec<([u16; 2], [u8; 3])>> = std::sync::RwLock::new(Vec::new());
++/// what the bottom screen showed when last looked at: 0 not known, 1 the
++/// HUD, 2 nothing (black), 3 something else, a menu.
++static HUD_SEEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
++
++pub fn set_hud_checks(checks: Vec<([u16; 2], [u8; 3])>) {
++    if let Ok(mut held) = HUD_CHECKS.write() {
++        *held = checks;
++    }
++}
++
++pub fn hud_checks() -> Vec<([u16; 2], [u8; 3])> {
++    HUD_CHECKS.read().map(|checks| checks.clone()).unwrap_or_default()
++}
++
++/// what the bottom screen showed when last looked at, as HUD_SEEN.
++pub fn hud_seen() -> u8 {
++    HUD_SEEN.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++/// tells from the bottom screen's picture, RGBA rows from the top at scale
++/// times its size, whether it shows the HUD (1), nothing (2) or else (3).
++pub fn note_hud_seen(pixels: &[u8], scale: u32, checks: &[([u16; 2], [u8; 3])]) -> u8 {
++    let (scale, width) = (scale.max(1) as usize, 320 * scale.max(1) as usize);
++    let at = |x: usize, y: usize| -> Option<[u8; 3]> {
++        let offset = ((y * scale) * width + x * scale) * 4;
++        pixels.get(offset..offset + 3).map(|p| [p[0], p[1], p[2]])
++    };
++    let matched = checks
++        .iter()
++        .filter(|([x, y], want)| at(*x as usize, *y as usize).is_some_and(|got| got.iter().zip(want).map(|(a, b)| (*a as i32 - *b as i32).abs()).sum::<i32>() <= 48))
++        .count();
++    let seen = if !checks.is_empty() && matched * 4 >= checks.len() * 3 {
++        1
++    } else if (0..8).all(|i| (0..6).all(|j| at(20 + i * 40, 20 + j * 40).is_some_and(|p| p.iter().all(|c| *c < 12)))) {
++        2
++    } else {
++        3
++    };
++    if HUD_SEEN.swap(seen, std::sync::atomic::Ordering::Relaxed) != seen {
++        log::info!("one-screen HUD: the bottom screen shows {}", ["?", "the HUD", "nothing", "something else"][seen as usize]);
++    }
++    seen
++}
++
  /// how the GPU reaches guest memory.
  pub trait GpuMemory {
      fn read(&mut self, addr: u32, out: &mut [u8]);
-@@ -355,6 +377,14 @@ pub struct Gpu {
+@@ -355,6 +424,14 @@ pub struct Gpu {
      pub bottom_full_rate: bool,
      /// whether fast mode may skip the bottom screen's pictures at all.
      pub skip_bottom: bool,
@@ -323,7 +394,7 @@ index 935b8ba..4436f99 100644
      /// in fast mode, the right eye's pictures of a title drawing both left
      /// out, the panel showing the left eye alone. a right eye's picture is a
      /// top one drawn into the buffer the left eye's just went out of, of top
-@@ -462,6 +492,9 @@ impl Gpu {
+@@ -462,6 +539,9 @@ impl Gpu {
              #[cfg(feature = "gles")]
              panel: None,
              skip_bottom: true,
@@ -333,7 +404,7 @@ index 935b8ba..4436f99 100644
              skip_right_eye: true,
              right_buffers: Vec::new(),
              twins: Twins::default(),
-@@ -717,6 +750,13 @@ impl Gpu {
+@@ -717,6 +797,13 @@ impl Gpu {
                  self.resources.redrawn_bottom = (self.bottom_redraws >= 8).then_some((input, input_end as u32));
              }
          }
@@ -347,7 +418,7 @@ index 935b8ba..4436f99 100644
          let from_skipped = self.skipped_targets.iter().any(|&(start, end)| {
              let start_at = memory.translate(start) as u64;
              (input as u64) < start_at + (end - start) as u64 && start_at < input_end
-@@ -1498,6 +1538,10 @@ impl Gpu {
+@@ -1498,6 +1585,10 @@ impl Gpu {
              log::info!("switch: bottom screen skipping back on");
              self.bottom_held = false;
          }
@@ -358,7 +429,7 @@ index 935b8ba..4436f99 100644
          if !self.drawing {
              self.drawing = true;
              // a picture is drawn after the most the frontend skips in a row,
-@@ -1559,6 +1603,21 @@ impl Gpu {
+@@ -1559,6 +1650,21 @@ impl Gpu {
          self.skipping
      }
  
@@ -510,10 +581,28 @@ index c4cb25e..71d0916 100644
                  Err(_) => {}
              }
 diff --git a/engine/gpu/src/raster/gles.rs b/engine/gpu/src/raster/gles.rs
-index 7d6da66..a57f269 100644
+index 7d6da66..c0f46ea 100644
 --- a/engine/gpu/src/raster/gles.rs
 +++ b/engine/gpu/src/raster/gles.rs
-@@ -2983,22 +2983,22 @@ impl Gles {
+@@ -2950,7 +2950,9 @@ impl Gles {
+             Err(error) => return Err(error),
+         };
+         self.programs.insert(key.clone(), program);
++        self.program_used.insert(program, self.flushes);
+         self.note_program(&key);
++        self.trim_programs();
+         Ok(Some(program))
+     }
+ 
+@@ -2973,6 +2975,7 @@ impl Gles {
+             match result {
+                 Ok(program) => {
+                     self.programs.insert(key.clone(), program);
++                    self.program_used.insert(program, self.flushes);
+                     self.note_program(&key);
+                 }
+                 Err(error) if error == SAVED => {}
+@@ -2983,26 +2986,27 @@ impl Gles {
                  }
                  Err(error) => {
                      // the driver out of memory, most likely: the next draw
@@ -545,7 +634,59 @@ index 7d6da66..a57f269 100644
                      self.compiler.as_mut().expect("the compiler is still there").failed.insert(key, error);
                  }
              }
-@@ -3827,11 +3827,24 @@ impl Gles {
+         }
++        self.trim_programs();
+         if self.compiler.as_ref().is_some_and(|compiler| compiler.pending.is_empty()) {
+             if let Some(path) = self.precache_stamp.take() {
+                 if let Err(error) = std::fs::write(&path, "") {
+@@ -3735,6 +3739,46 @@ impl Gles {
+     /// textures, the vertex arrays kept on the GPU and the programs nothing
+     /// drew with for a while, rather than every draw after it going to the
+     /// CPU. Once a batch at most.
++    /// keeps the programs alive under ZAKURO_PROGRAM_CAP (150 by default, 0
++    /// for no cap), letting go of those drawn with longest ago down to three
++    /// quarters of it: Mali's driver turns down links, with an empty log and
++    /// the GL thread stalled, once some 190 programs each carrying Majora's
++    /// Mask 3D's 3968-line vertex shader are alive. One let go and needed
++    /// again comes back from its saved copy on disk, quickly.
++    fn trim_programs(&mut self) {
++        static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++        let cap = *CAP.get_or_init(|| std::env::var("ZAKURO_PROGRAM_CAP").ok().and_then(|cap| cap.parse().ok()).unwrap_or(150));
++        if cap == 0 || self.programs.len() <= cap {
++            return;
++        }
++        let mut by_age: Vec<(u64, ProgramKey)> = self.programs.iter().map(|(key, program)| (self.program_used.get(program).copied().unwrap_or(0), key.clone())).collect();
++        by_age.sort_by_key(|(at, _)| *at);
++        let excess = self.programs.len() - cap * 3 / 4;
++        let mut gone = Vec::new();
++        for (at, key) in by_age.into_iter().take(excess) {
++            // the batch being made keeps what its draws already took
++            if at >= self.flushes {
++                break;
++            }
++            if let Some(program) = self.programs.remove(&key) {
++                self.program_used.remove(&program);
++                gone.push(program);
++            }
++        }
++        if gone.is_empty() {
++            return;
++        }
++        self.fragment = None;
++        self.stamped = None;
++        log::info!("{} programs alive over the cap of {cap}: letting go of the {} drawn with longest ago", self.programs.len() + gone.len(), gone.len());
++        let gl = self.gl;
++        self.worker.post_keeping(move || {
++            disturb();
++            // SAFETY: on the GL thread, after every draw that used them
++            gone.into_iter().for_each(|program| delete_program(&gl, program));
++        });
++    }
++
+     fn make_room(&mut self) {
+         if self.room_made == Some(self.flushes) {
+             return;
+@@ -3827,11 +3871,24 @@ impl Gles {
                          let up = |length: u32| self.up(length) as i32;
                          let screen = [up(screen.rows.1), up(screen.columns), up(s.height), up(screen.rows.0)];
                          let top = index == 0;
@@ -571,7 +712,7 @@ index 7d6da66..a57f269 100644
                  crate::PanelImage::Pixels(pixels, width, height) => parts.push(Part::Pixels { index, pixels, width, height, area, smooth: smooth && index == 0 }),
              }
          }
-@@ -4473,16 +4486,9 @@ impl Gles {
+@@ -4473,16 +4530,9 @@ impl Gles {
                      exact = false;
                      self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?
                  }
@@ -700,10 +841,10 @@ index 7fb721c..c313f82 100644
  /// GPUREG_DEPTHMAP_ENABLE, 1 for a z-buffer, 0 for a w-buffer.
 diff --git a/frontend/src/hud.rs b/frontend/src/hud.rs
 new file mode 100644
-index 0000000..34d50b5
+index 0000000..24b5ec7
 --- /dev/null
 +++ b/frontend/src/hud.rs
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,127 @@
 +//! the one-screen HUD, from hud.txt in the game's data folder: pieces of the
 +//! bottom screen drawn over the top screen's layout, buttons that touch a
 +//! fixed point of the bottom screen, and a button that shows the bottom
@@ -718,6 +859,10 @@ index 0000000..34d50b5
 +//!   swap   KEY                        KEY shows the bottom screen by itself, and
 +//!                                     back; meanwhile the right stick moves the
 +//!                                     touch cursor and R2 touches
++//!   check  X Y R G B                  a point of the bottom screen and its color
++//!                                     while it shows the HUD: with some, a bottom
++//!                                     screen showing something else (a menu) brings
++//!                                     both screens up until the HUD is back
 +//! KEY: L2 R2 L3 R3 SELECT START A B X Y L1 R1 UP DOWN LEFT RIGHT
 +
 +use std::path::Path;
@@ -729,6 +874,7 @@ index 0000000..34d50b5
 +    pub pieces: Vec<([i32; 4], [i32; 4])>,
 +    pub taps: Vec<(u16, (u16, u16))>,
 +    pub swap: Option<u16>,
++    pub checks: Vec<([u16; 2], [u8; 3])>,
 +}
 +
 +fn key(name: &str) -> Option<u16> {
@@ -758,7 +904,7 @@ index 0000000..34d50b5
 +    pub fn load(path: &Path) -> Hud {
 +        let Ok(text) = std::fs::read_to_string(path) else { return Hud::default() };
 +        let hud = Hud::parse(&text);
-+        log::info!("one-screen HUD from {}: {} pieces, {} taps, swap {}", path.display(), hud.pieces.len(), hud.taps.len(), hud.swap.is_some());
++        log::info!("one-screen HUD from {}: {} pieces, {} taps, swap {}, {} checks", path.display(), hud.pieces.len(), hud.taps.len(), hud.swap.is_some(), hud.checks.len());
 +        hud
 +    }
 +
@@ -783,6 +929,13 @@ index 0000000..34d50b5
 +                        true
 +                    }
 +                    _ => false,
++                },
++                ["check", ..] if words.len() == 6 => match numbers(1) {
++                    Some(n) => {
++                        hud.checks.push(([n[0].clamp(0, 319) as u16, n[1].clamp(0, 239) as u16], [n[2].clamp(0, 255) as u8, n[3].clamp(0, 255) as u8, n[4].clamp(0, 255) as u8]));
++                        true
++                    }
++                    None => false,
 +                },
 +                ["swap", name] => match key(name) {
 +                    Some(key) => {
@@ -820,7 +973,7 @@ index 0000000..34d50b5
 +    }
 +}
 diff --git a/frontend/src/lib.rs b/frontend/src/lib.rs
-index 22c3a93..2abc9d9 100644
+index 22c3a93..6851b42 100644
 --- a/frontend/src/lib.rs
 +++ b/frontend/src/lib.rs
 @@ -18,6 +18,7 @@
@@ -831,31 +984,51 @@ index 22c3a93..2abc9d9 100644
  pub mod input;
  mod keyboard;
  mod layout;
-@@ -124,6 +125,10 @@ pub fn run(mut args: Vec<String>) {
+@@ -124,6 +125,14 @@ pub fn run(mut args: Vec<String>) {
      let data = PathBuf::from(std::env::var_os("ZAKURO_DATA").unwrap_or_else(|| ".".into()));
      let game_path = data.join("settings.toml");
      let mut game: GameSettings = settings::load(&game_path);
 +    // the one-screen HUD, where the game has a hud.txt
 +    let hud = hud::Hud::load(&data.join("hud.txt"));
 +    zakuro_gpu::set_hud(hud.pieces.clone());
++    zakuro_gpu::set_hud_checks(hud.checks.clone());
 +    let hud_on = !hud.pieces.is_empty() || !hud.taps.is_empty() || hud.swap.is_some();
++    // both screens up while the bottom one shows a menu, and since when the
++    // bottom screen has said otherwise
++    let (mut auto_both, mut auto_since) = (false, Instant::now());
      let profile = profile::find(&profile::titles_dir(), title_id_of(&path)).unwrap_or_default();
      let advanced = Advanced::of(&game, &profile);
      advanced.export();
-@@ -477,7 +482,11 @@ pub fn run(mut args: Vec<String>) {
+@@ -477,7 +486,27 @@ pub fn run(mut args: Vec<String>) {
          }
          // the right stick as the C-stick, L2 and R2 as ZL and ZR, which
          // leaves tilting and touching to the cursor's way
 -        let c_stick = settings.right_stick == RightStick::CStick;
 +        // under the one-screen HUD, the bottom screen shown by itself takes
 +        // the touch cursor on the right stick and R2, to drag masks and items
-+        let hud_top = hud_on && settings.layout == Layout::TopOnly && !settings.swapped;
++        // a menu on the bottom screen (it shows neither the HUD nor black)
++        // brings both screens up, a third of a second after it came
++        if !hud.checks.is_empty() && settings.layout == Layout::TopOnly && !settings.swapped {
++            let want = match zakuro_gpu::hud_seen() {
++                3 => true,
++                1 | 2 => false,
++                _ => auto_both,
++            };
++            if want == auto_both {
++                auto_since = Instant::now();
++            } else if auto_since.elapsed() > Duration::from_millis(300) {
++                auto_both = want;
++            }
++        } else {
++            auto_both = false;
++        }
++        let hud_top = hud_on && settings.layout == Layout::TopOnly && !settings.swapped && !auto_both;
 +        let hud_bottom = hud_on && settings.layout == Layout::TopOnly && settings.swapped;
-+        let c_stick = settings.right_stick == RightStick::CStick && !hud_bottom;
++        let c_stick = settings.right_stick == RightStick::CStick && !hud_bottom && !auto_both;
          let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
          let tilt = if keys.contains(&L2) && !c_stick {
              (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
-@@ -509,7 +518,15 @@ pub fn run(mut args: Vec<String>) {
+@@ -509,7 +538,15 @@ pub fn run(mut args: Vec<String>) {
              };
              (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
          }
@@ -871,7 +1044,7 @@ index 22c3a93..2abc9d9 100644
  
          let behind = match probe.as_mut() {
              Some(probe) => probe.behind(),
-@@ -526,12 +543,14 @@ pub fn run(mut args: Vec<String>) {
+@@ -526,12 +563,14 @@ pub fn run(mut args: Vec<String>) {
          let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
          let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
          system.skip_frames(skip, unshown, most_skipped);
@@ -889,7 +1062,7 @@ index 22c3a93..2abc9d9 100644
          let step = input::cursor_step(settings.touch_speed);
          if c_stick || !keys.contains(&L2) {
              let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
-@@ -564,7 +583,8 @@ pub fn run(mut args: Vec<String>) {
+@@ -564,7 +603,8 @@ pub fn run(mut args: Vec<String>) {
          if probe.is_some() && script.is_empty() {
              system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
          } else if script.is_empty() {
@@ -899,7 +1072,7 @@ index 22c3a93..2abc9d9 100644
          } else {
              system.set_input(scripted_input(&script, frame_number));
          }
-@@ -630,6 +650,10 @@ pub fn run(mut args: Vec<String>) {
+@@ -630,6 +670,10 @@ pub fn run(mut args: Vec<String>) {
                  shown - counted_shown,
                  busy.report()
              );
@@ -910,6 +1083,24 @@ index 22c3a93..2abc9d9 100644
              (counted_transfers, counted_top, counted_bottom, counted_shown) = (transfers, top, bottom, shown);
              (counted, rendered, since) = (0, 0, Instant::now());
              logs += 1;
+@@ -664,14 +708,15 @@ pub fn run(mut args: Vec<String>) {
+                     status = now;
+                 }
+             }
+-            let areas = layout::shown(&settings);
++            // a menu on the bottom screen shows both, the top one big
++            let areas = if auto_both { layout::shown(&Settings { layout: Layout::BigTop, ..settings.clone() }) } else { layout::shown(&settings) };
+             // on two screens a finger touches the bottom one, and the
+             // cursor shows only for a moment after the stick moved it
+             let two_screens = zakuro_gpu::stacked() || zakuro_gpu::second_window();
+             let cursor_shown = match settings.cursor {
+                 Cursor::Shown => true,
+                 Cursor::Hidden => false,
+-                Cursor::Auto => !two_screens || cursor_moved.is_some_and(|moved| moved.elapsed() < Duration::from_secs(2)),
++                Cursor::Auto => !(two_screens || auto_both) || cursor_moved.is_some_and(|moved| moved.elapsed() < Duration::from_secs(2)),
+             };
+             let pointer = areas[1].filter(|_| cursor_shown).map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
+             system.present_panel(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating);
 diff --git a/recompiler/src/codegen/a64.rs b/recompiler/src/codegen/a64.rs
 index 1884cc4..7dcb419 100644
 --- a/recompiler/src/codegen/a64.rs
