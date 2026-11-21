@@ -1,0 +1,24 @@
+# HUD de una pantalla para Majora's Mask 3D (USA Rev 1) en la R36S, 640x480.
+# Va en pocket-native/games/0004000000125500/data/hud.txt. Usa el layout "TopOnly":
+# el juego queda en 0,48 640x384 y las franjas negras (48 px arriba y abajo) llevan el HUD.
+#
+# piece  origen en la pantalla de abajo (320x240)   destino en el panel (640x480)
+
+# franja de arriba: corazones y magia, rupias
+piece   80   0 172  40      8   0 206  48
+piece    0  64  60  32    557   4  75  40
+
+# franja de abajo: Ver, y los botones I, Y, X, II (a la izquierda queda el reloj de Pocket Native)
+piece    0   0  56  56    360 432  48  48
+piece  264   0  56  56    416 432  48  48
+piece  258 118  52  52    472 432  48  48
+piece  266  68  52  52    528 432  48  48
+piece  264 184  56  56    584 432  48  48
+
+# L2 toca el botón I, R2 el botón II
+tap L2 292 28
+tap R2 292 212
+
+# Select: ver la pantalla de abajo completa (máscaras, objetos, mapa) y volver.
+# Ahí el stick derecho mueve el cursor y R2 toca o arrastra.
+swap SELECT

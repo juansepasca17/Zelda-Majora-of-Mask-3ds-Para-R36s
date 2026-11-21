@@ -1,0 +1,343 @@
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+index 085f1a6..742edcd 100644
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -1151,7 +1151,10 @@ impl System {
+         // with ZAKURO_HIDE_BOTTOM=1 only: Ocarina ReFramed draws parts of
+         // the top screen through the bottom one's buffer
+         static HIDE_BOTTOM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-        let bottom_hidden = areas[1].is_none() && *HIDE_BOTTOM.get_or_init(|| std::env::var_os("ZAKURO_HIDE_BOTTOM").is_some());
++        // the one-screen HUD shows pieces of the bottom screen over the top
++        // one's layout, which then still needs it drawn
++        let hud = areas[0].is_some() && areas[1].is_none() && zakuro_gpu::hud_active();
++        let bottom_hidden = areas[1].is_none() && !hud && *HIDE_BOTTOM.get_or_init(|| std::env::var_os("ZAKURO_HIDE_BOTTOM").is_some());
+         self.gpu_work(&[], move |gpu, _, guest| {
+             if gpu.bottom_hidden != bottom_hidden {
+                 log::info!("bottom screen {}", if bottom_hidden { "hidden, its draws left out" } else { "shown again" });
+@@ -1174,7 +1177,8 @@ impl System {
+             let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(2) as u32;
+             let mut shown = [None, None];
+             for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
+-                let Some(area) = areas[index] else { continue };
++                // no area for the bottom screen under the HUD: [0; 4] asks for its pieces
++                let Some(area) = areas[index].or((hud && index == 1).then_some([0; 4])) else { continue };
+                 let image = match screen_ref(gpu, guest, screen, black) {
+                     Some(found) => zakuro_gpu::PanelImage::Gpu(found),
+                     None => zakuro_gpu::PanelImage::Pixels(screen_pixels(gpu, guest, screen, black), screen.width(), screen.height()),
+diff --git a/engine/gpu/src/lib.rs b/engine/gpu/src/lib.rs
+index 5d27da2..4436f99 100644
+--- a/engine/gpu/src/lib.rs
++++ b/engine/gpu/src/lib.rs
+@@ -22,6 +22,28 @@ pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
+ #[cfg(feature = "gles")]
+ pub use raster::gles::{compiling, compiling_stand_ins, preparing, skip_preparing, waited_draws, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
+ 
++/// the one-screen HUD: pieces of the bottom screen, left, top, width and
++/// height in its own pixels, each drawn over an area of the layout, while
++/// the layout shows the top screen alone (the game's hud.txt).
++static HUD: std::sync::RwLock<Vec<([i32; 4], [i32; 4])>> = std::sync::RwLock::new(Vec::new());
++
++/// sets the one-screen HUD's pieces, none to turn it off.
++pub fn set_hud(pieces: Vec<([i32; 4], [i32; 4])>) {
++    if let Ok(mut hud) = HUD.write() {
++        *hud = pieces;
++    }
++}
++
++/// the one-screen HUD's pieces.
++pub fn hud() -> Vec<([i32; 4], [i32; 4])> {
++    HUD.read().map(|hud| hud.clone()).unwrap_or_default()
++}
++
++/// whether the one-screen HUD has pieces to draw.
++pub fn hud_active() -> bool {
++    HUD.read().is_ok_and(|hud| !hud.is_empty())
++}
++
+ /// how the GPU reaches guest memory.
+ pub trait GpuMemory {
+     fn read(&mut self, addr: u32, out: &mut [u8]);
+diff --git a/engine/gpu/src/raster/gles.rs b/engine/gpu/src/raster/gles.rs
+index 529679f..a57f269 100644
+--- a/engine/gpu/src/raster/gles.rs
++++ b/engine/gpu/src/raster/gles.rs
+@@ -3827,11 +3827,24 @@ impl Gles {
+                         let up = |length: u32| self.up(length) as i32;
+                         let screen = [up(screen.rows.1), up(screen.columns), up(s.height), up(screen.rows.0)];
+                         let top = index == 0;
++                        // the bottom screen with no area of its own: only its
++                        // pieces for the one-screen HUD, each the whole screen
++                        // scaled and placed so the piece lands on its area
++                        if !top && area[2] == 0 {
++                            for ([sx, sy, sw, sh], [dx, dy, dw, dh]) in crate::hud() {
++                                let (kx, ky) = (dw as f32 / sw.max(1) as f32, dh as f32 / sh.max(1) as f32);
++                                let whole = [dx - (sx as f32 * kx).round() as i32, dy - (sy as f32 * ky).round() as i32, (320.0 * kx).round() as i32, (240.0 * ky).round() as i32];
++                                parts.push(Part::Surface { texture: s.texture, screen, area: whole, smooth: smooth && self.scaled(), top: false, picture: None, clip: Some([dx, dy, dw, dh]) });
++                            }
++                            continue;
++                        }
+                         // the bottom screen too once it is drawn bigger, its pixels no longer the console's
+                         let smooth = smooth && (top || self.scaled());
+-                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth, top, picture: (interpolate && top).then_some(s.version) });
++                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth, top, picture: (interpolate && top).then_some(s.version), clip: None });
+                     }
+                 }
++                // the HUD's pieces come from the GPU's picture only
++                crate::PanelImage::Pixels(..) if area[2] == 0 => {}
+                 crate::PanelImage::Pixels(pixels, width, height) => parts.push(Part::Pixels { index, pixels, width, height, area, smooth: smooth && index == 0 }),
+             }
+         }
+diff --git a/engine/gpu/src/raster/gles/display.rs b/engine/gpu/src/raster/gles/display.rs
+index 7a8d25d..574e4bf 100644
+--- a/engine/gpu/src/raster/gles/display.rs
++++ b/engine/gpu/src/raster/gles/display.rs
+@@ -811,7 +811,8 @@ impl Fit {
+ pub(super) enum Part {
+     Cursor { x: i32, y: i32 },
+     /// a screen's buffer, the top one's version when it is interpolated.
+-    Surface { texture: glow::Texture, screen: [i32; 4], area: [i32; 4], smooth: bool, top: bool, picture: Option<u64> },
++    /// clip, in the layout's pixels, keeps a piece of it only (the one-screen HUD).
++    Surface { texture: glow::Texture, screen: [i32; 4], area: [i32; 4], smooth: bool, top: bool, picture: Option<u64>, clip: Option<[i32; 4]> },
+     Pixels { index: usize, pixels: Vec<u8>, width: u32, height: u32, area: [i32; 4], smooth: bool },
+     Overlay(Arc<crate::Overlay>),
+ }
+@@ -1049,7 +1050,7 @@ pub(super) unsafe fn draw_parts(
+ ) -> Result<(), String> {
+             let framebuffer_height = height;
+             let bottom = parts.iter().find_map(|part| match part {
+-                Part::Surface { top: false, area, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
++                Part::Surface { top: false, area, clip: None, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
+                 _ => None,
+             });
+             for part in parts {
+@@ -1065,8 +1066,28 @@ pub(super) unsafe fn draw_parts(
+                         gl.disable(glow::SCISSOR_TEST);
+                         continue;
+                     }
+-                    Part::Surface { texture, screen, area, smooth, top, picture } => {
++                    Part::Surface { texture, screen, area, smooth, top, picture, clip: piece } => {
+                         let (area, clip) = cropped(fit.area(area), top, height);
++                        // a piece of the bottom screen for the one-screen HUD:
++                        // the whole screen placed so the piece lands on its
++                        // area, the rest scissored away
++                        if let Some(piece) = piece {
++                            let [x, y, w, h] = fit.area(piece);
++                            gl.use_program(Some(program));
++                            let gl_y = height - area[1] - area[3];
++                            gl.viewport(area[0], gl_y, area[2], area[3]);
++                            gl.uniform_4_i32(gl.get_uniform_location(program, "area").as_ref(), area[0], gl_y, area[2], area[3]);
++                            gl.uniform_4_i32(gl.get_uniform_location(program, "screen").as_ref(), screen[0], screen[1], screen[2], screen[3]);
++                            gl.uniform_1_i32(gl.get_uniform_location(program, "upright").as_ref(), 0);
++                            gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
++                            gl.bind_sampler(0, smooth.then_some(linear));
++                            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
++                            gl.enable(glow::SCISSOR_TEST);
++                            gl.scissor(x, height - y - h, w, h);
++                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
++                            gl.disable(glow::SCISSOR_TEST);
++                            continue;
++                        }
+                         let step = match picture {
+                             Some(version) => panel.between.step((texture, version)),
+                             None => {
+diff --git a/frontend/src/hud.rs b/frontend/src/hud.rs
+new file mode 100644
+index 0000000..34d50b5
+--- /dev/null
++++ b/frontend/src/hud.rs
+@@ -0,0 +1,115 @@
++//! the one-screen HUD, from hud.txt in the game's data folder: pieces of the
++//! bottom screen drawn over the top screen's layout, buttons that touch a
++//! fixed point of the bottom screen, and a button that shows the bottom
++//! screen by itself, for games like Majora's Mask 3D whose bottom screen
++//! holds buttons played all the time.
++//!
++//! hud.txt, one line each, # for notes:
++//!   piece  SX SY SW SH  DX DY DW DH   the bottom screen's SX,SY,SW,SH (its
++//!                                     pixels, 320x240) over DX,DY,DW,DH of the
++//!                                     layout (640x480 on the R36S)
++//!   tap    KEY X Y                    KEY held touches the bottom screen at X,Y
++//!   swap   KEY                        KEY shows the bottom screen by itself, and
++//!                                     back; meanwhile the right stick moves the
++//!                                     touch cursor and R2 touches
++//! KEY: L2 R2 L3 R3 SELECT START A B X Y L1 R1 UP DOWN LEFT RIGHT
++
++use std::path::Path;
++
++use crate::input::{A, B, DOWN, L1, L2, L3, LEFT, R1, R2, R3, RIGHT, SELECT, START, UP, X, Y};
++
++#[derive(Default)]
++pub struct Hud {
++    pub pieces: Vec<([i32; 4], [i32; 4])>,
++    pub taps: Vec<(u16, (u16, u16))>,
++    pub swap: Option<u16>,
++}
++
++fn key(name: &str) -> Option<u16> {
++    Some(match name.to_ascii_uppercase().as_str() {
++        "L2" => L2,
++        "R2" => R2,
++        "L3" => L3,
++        "R3" => R3,
++        "SELECT" => SELECT,
++        "START" => START,
++        "A" => A,
++        "B" => B,
++        "X" => X,
++        "Y" => Y,
++        "L1" => L1,
++        "R1" => R1,
++        "UP" => UP,
++        "DOWN" => DOWN,
++        "LEFT" => LEFT,
++        "RIGHT" => RIGHT,
++        _ => return None,
++    })
++}
++
++impl Hud {
++    /// the HUD hud.txt describes, none without one.
++    pub fn load(path: &Path) -> Hud {
++        let Ok(text) = std::fs::read_to_string(path) else { return Hud::default() };
++        let hud = Hud::parse(&text);
++        log::info!("one-screen HUD from {}: {} pieces, {} taps, swap {}", path.display(), hud.pieces.len(), hud.taps.len(), hud.swap.is_some());
++        hud
++    }
++
++    pub fn parse(text: &str) -> Hud {
++        let mut hud = Hud::default();
++        for (number, line) in text.lines().enumerate() {
++            let line = line.split('#').next().unwrap_or("").trim();
++            let words: Vec<&str> = line.split_whitespace().collect();
++            let numbers = |from: usize| words[from..].iter().map(|word| word.parse::<i32>()).collect::<Result<Vec<_>, _>>().ok();
++            let fine = match words.as_slice() {
++                [] => true,
++                ["piece", ..] if words.len() == 9 => match numbers(1) {
++                    Some(n) => {
++                        hud.pieces.push(([n[0], n[1], n[2], n[3]], [n[4], n[5], n[6], n[7]]));
++                        true
++                    }
++                    None => false,
++                },
++                ["tap", name, ..] if words.len() == 4 => match (key(name), numbers(2)) {
++                    (Some(key), Some(n)) => {
++                        hud.taps.push((key, (n[0].clamp(0, 319) as u16, n[1].clamp(0, 239) as u16)));
++                        true
++                    }
++                    _ => false,
++                },
++                ["swap", name] => match key(name) {
++                    Some(key) => {
++                        hud.swap = Some(key);
++                        true
++                    }
++                    None => false,
++                },
++                _ => false,
++            };
++            if !fine {
++                log::warn!("hud.txt line {}: not understood, {line}", number + 1);
++            }
++        }
++        hud
++    }
++
++    /// whether the HUD claims a key, which then reaches the game no other way.
++    pub fn claims(&self, key: u16) -> bool {
++        self.swap == Some(key) || self.taps.iter().any(|(tap, _)| *tap == key)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reads_the_lines() {
++        let hud = Hud::parse("# notes\npiece 264 0 56 56  592 432 48 48\ntap L2 292 28\nswap select\nnonsense here\n");
++        assert_eq!(hud.pieces, vec![([264, 0, 56, 56], [592, 432, 48, 48])]);
++        assert_eq!(hud.taps, vec![(L2, (292, 28))]);
++        assert_eq!(hud.swap, Some(SELECT));
++        assert!(hud.claims(L2) && hud.claims(SELECT) && !hud.claims(R2));
++    }
++}
+diff --git a/frontend/src/lib.rs b/frontend/src/lib.rs
+index d112b32..2abc9d9 100644
+--- a/frontend/src/lib.rs
++++ b/frontend/src/lib.rs
+@@ -18,6 +18,7 @@
+ mod busy;
+ mod crash;
+ mod font;
++mod hud;
+ pub mod input;
+ mod keyboard;
+ mod layout;
+@@ -124,6 +125,10 @@ pub fn run(mut args: Vec<String>) {
+     let data = PathBuf::from(std::env::var_os("ZAKURO_DATA").unwrap_or_else(|| ".".into()));
+     let game_path = data.join("settings.toml");
+     let mut game: GameSettings = settings::load(&game_path);
++    // the one-screen HUD, where the game has a hud.txt
++    let hud = hud::Hud::load(&data.join("hud.txt"));
++    zakuro_gpu::set_hud(hud.pieces.clone());
++    let hud_on = !hud.pieces.is_empty() || !hud.taps.is_empty() || hud.swap.is_some();
+     let profile = profile::find(&profile::titles_dir(), title_id_of(&path)).unwrap_or_default();
+     let advanced = Advanced::of(&game, &profile);
+     advanced.export();
+@@ -477,7 +482,11 @@ pub fn run(mut args: Vec<String>) {
+         }
+         // the right stick as the C-stick, L2 and R2 as ZL and ZR, which
+         // leaves tilting and touching to the cursor's way
+-        let c_stick = settings.right_stick == RightStick::CStick;
++        // under the one-screen HUD, the bottom screen shown by itself takes
++        // the touch cursor on the right stick and R2, to drag masks and items
++        let hud_top = hud_on && settings.layout == Layout::TopOnly && !settings.swapped;
++        let hud_bottom = hud_on && settings.layout == Layout::TopOnly && settings.swapped;
++        let c_stick = settings.right_stick == RightStick::CStick && !hud_bottom;
+         let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
+         let tilt = if keys.contains(&L2) && !c_stick {
+             (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
+@@ -509,7 +518,15 @@ pub fn run(mut args: Vec<String>) {
+             };
+             (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
+         }
++        // the HUD's swap key shows the bottom screen by itself, and back
++        if let Some(swap) = hud.swap.filter(|_| settings.layout == Layout::TopOnly) {
++            if !hotkey && keys.contains(&swap) && !held.contains(&swap) {
++                settings.swapped = !settings.swapped;
++            }
++        }
+         held = keys.clone();
++        // the keys the HUD claims reach the game no other way
++        let game_keys: HashSet<u16> = if hud_on && settings.layout == Layout::TopOnly { keys.iter().copied().filter(|key| !hud.claims(*key) || (hud_bottom && *key == R2)).collect() } else { keys.clone() };
+ 
+         let behind = match probe.as_mut() {
+             Some(probe) => probe.behind(),
+@@ -526,12 +543,14 @@ pub fn run(mut args: Vec<String>) {
+         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
+         let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
+         system.skip_frames(skip, unshown, most_skipped);
+-        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings, &game.buttons) };
++        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&game_keys, &axes, &settings, &game.buttons) };
+         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
+         if c_stick && !hotkey {
+-            buttons.set(PadState::ZL, keys.contains(&L2));
+-            buttons.set(PadState::ZR, keys.contains(&R2));
++            buttons.set(PadState::ZL, game_keys.contains(&L2));
++            buttons.set(PadState::ZR, game_keys.contains(&R2));
+         }
++        // a HUD tap key held touches its point while the top screen is shown
++        let tapped = if hud_top && !hotkey { hud.taps.iter().find(|(key, _)| keys.contains(key)).map(|(_, point)| *point) } else { None };
+         let step = input::cursor_step(settings.touch_speed);
+         if c_stick || !keys.contains(&L2) {
+             let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
+@@ -564,7 +583,8 @@ pub fn run(mut args: Vec<String>) {
+         if probe.is_some() && script.is_empty() {
+             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
+         } else if script.is_empty() {
+-            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt, motion: motion.filter(|_| tilt == (0.0, 0.0)) });
++            let touch = tapped.or(touching.then_some((cursor.0 as u16, cursor.1 as u16)));
++            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch, tilt, motion: motion.filter(|_| tilt == (0.0, 0.0)) });
+         } else {
+             system.set_input(scripted_input(&script, frame_number));
+         }

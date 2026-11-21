@@ -1,6 +1,6 @@
 language = 5
 region = 1
-layout = "BigTop"
+layout = "TopOnly"
 swapped = false
 
 [options]

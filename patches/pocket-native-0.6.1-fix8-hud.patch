@@ -1,0 +1,1163 @@
+diff --git a/engine/core/src/kernel/svc.rs b/engine/core/src/kernel/svc.rs
+index fda80fe..05cedb8 100644
+--- a/engine/core/src/kernel/svc.rs
++++ b/engine/core/src/kernel/svc.rs
+@@ -90,6 +90,7 @@ pub fn dispatch(system: &mut System, number: u32) {
+         0x2B => get_process_info(system),
+         0x2D => connect_to_port(system),
+         0x32 => send_sync_request(system),
++        0x33 => open_process(system),
+         0x35 => get_process_id(system),
+         0x37 => get_thread_id(system),
+         0x38 => get_resource_limit(system),
+@@ -97,6 +98,7 @@ pub fn dispatch(system: &mut System, number: u32) {
+         0x3A => get_resource_limit_current_values(system),
+         0x3C => svc_break(system),
+         0x3D => output_debug_string(system),
++        0x70 => control_process_memory(system),
+         // cache maintenance.
+         0x54..=0x56 => {
+             system.cpu.regs[0] = 0;
+@@ -1080,6 +1082,39 @@ fn get_process_id(system: &mut System) {
+     system.cpu.regs[1] = system.kernel.process_id;
+ }
+ 
++/// svcOpenProcess, r1 = process id. Only the game's own process exists here,
++/// which code mods such as Ocarina ReFramed open to change their own pages.
++fn open_process(system: &mut System) {
++    let process_id = system.cpu.regs[1];
++    if process_id != system.kernel.process_id {
++        log::warn!("svcOpenProcess for process {process_id}, only {} exists", system.kernel.process_id);
++        system.cpu.regs[0] = errors::UNIMPLEMENTED.0;
++        return;
++    }
++    let object = system.kernel.objects.insert(KObject::Process);
++    let handle = system
++        .kernel
++        .handles
++        .create(&mut system.kernel.objects, object, "Process");
++    system.cpu.regs[0] = 0;
++    system.cpu.regs[1] = handle;
++}
++
++/// svcControlProcessMemory, r0 = process, r1 = addr0, r2 = addr1, r3 = size,
++/// r4 = operation, r5 = permission. Code mods use it on their own process to
++/// make the code they loaded past .data executable. Pages here carry no
++/// execute permission, so protecting mapped memory has nothing to do.
++fn control_process_memory(system: &mut System) {
++    let [_process, addr0, _addr1, size, operation, permission] = [0, 1, 2, 3, 4, 5].map(|r| system.cpu.regs[r]);
++    if operation & MEMOP_OP_MASK == MEMOP_PROTECT {
++        log::info!("svcControlProcessMemory protects 0x{addr0:08X}, 0x{size:X} bytes, permission {permission}: nothing to do");
++        system.cpu.regs[0] = 0;
++        return;
++    }
++    log::warn!("svcControlProcessMemory operation {operation} at 0x{addr0:08X}, 0x{size:X} bytes, not implemented");
++    system.cpu.regs[0] = errors::UNIMPLEMENTED.0;
++}
++
+ fn get_resource_limit(system: &mut System) {
+     let _process = system.cpu.regs[1];
+     let object = system.kernel.objects.insert(KObject::ResourceLimit);
+diff --git a/engine/core/src/lib.rs b/engine/core/src/lib.rs
+index dfab5f7..742edcd 100644
+--- a/engine/core/src/lib.rs
++++ b/engine/core/src/lib.rs
+@@ -180,6 +180,8 @@ pub struct System {
+     /// the ones recompiled code ran, to see how much the library covers.
+     pub interpreted_instructions: u64,
+     pub recompiled_instructions: u64,
++    /// the two counts as interpreted_share last took them.
++    interp_counted: (u64, u64),
+ }
+ 
+ /// cycles in one 60 Hz frame at the ARM11's clock.
+@@ -251,6 +253,7 @@ impl System {
+             gpu_queue: None,
+             interpreted_instructions: 0,
+             recompiled_instructions: 0,
++            interp_counted: (0, 0),
+         }
+     }
+ 
+@@ -1144,7 +1147,19 @@ impl System {
+             PRESENT_WAITED.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+             presents.fetch_add(1, Ordering::AcqRel);
+         }
++        // a layout with no room for the bottom screen lets its draws go,
++        // with ZAKURO_HIDE_BOTTOM=1 only: Ocarina ReFramed draws parts of
++        // the top screen through the bottom one's buffer
++        static HIDE_BOTTOM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        // the one-screen HUD shows pieces of the bottom screen over the top
++        // one's layout, which then still needs it drawn
++        let hud = areas[0].is_some() && areas[1].is_none() && zakuro_gpu::hud_active();
++        let bottom_hidden = areas[1].is_none() && !hud && *HIDE_BOTTOM.get_or_init(|| std::env::var_os("ZAKURO_HIDE_BOTTOM").is_some());
+         self.gpu_work(&[], move |gpu, _, guest| {
++            if gpu.bottom_hidden != bottom_hidden {
++                log::info!("bottom screen {}", if bottom_hidden { "hidden, its draws left out" } else { "shown again" });
++                gpu.bottom_hidden = bottom_hidden;
++            }
+             let state = Some((gpu.pictures, gpu.shown_address(0), gpu.shown_address(1)));
+             // a halfway picture went up for something new, which goes up next
+             let new = gpu.presented != state;
+@@ -1162,7 +1177,8 @@ impl System {
+             let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(2) as u32;
+             let mut shown = [None, None];
+             for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
+-                let Some(area) = areas[index] else { continue };
++                // no area for the bottom screen under the HUD: [0; 4] asks for its pieces
++                let Some(area) = areas[index].or((hud && index == 1).then_some([0; 4])) else { continue };
+                 let image = match screen_ref(gpu, guest, screen, black) {
+                     Some(found) => zakuro_gpu::PanelImage::Gpu(found),
+                     None => zakuro_gpu::PanelImage::Pixels(screen_pixels(gpu, guest, screen, black), screen.width(), screen.height()),
+@@ -1259,6 +1275,31 @@ impl GpuMemory for GuestMemory<'_> {
+     }
+ }
+ 
++impl System {
++    /// the share of instructions the interpreter ran since the last call, in
++    /// percent, for the frontend's periodic log line.
++    pub fn interpreted_share(&mut self) -> f64 {
++        let fallbacks = self.recompiled.as_ref().map_or(0, |library| library.fallbacks());
++        let interpreted = self.interpreted_instructions + fallbacks;
++        let total = interpreted + self.recompiled_instructions;
++        let (last_interpreted, last_total) = std::mem::replace(&mut self.interp_counted, (interpreted, total));
++        let ran = total.saturating_sub(last_total).max(1);
++        interpreted.saturating_sub(last_interpreted) as f64 * 100.0 / ran as f64
++    }
++}
++
++/// with ZAKURO_INTERP_STATS, the busiest addresses the interpreter ran so
++/// far, logged while the game runs: a game stopped by a signal never gets to
++/// the report its end prints.
++pub fn log_interpreted_busiest(count: usize) {
++    if let Some(counts) = INTERPRETED.lock().unwrap().as_ref() {
++        let mut busiest: Vec<_> = counts.iter().map(|(&address, &n)| (address, n)).collect();
++        busiest.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
++        let line: Vec<String> = busiest.into_iter().take(count).map(|(address, n)| format!("{address:08X}x{n}")).collect();
++        log::info!("interpreted busiest: {}", line.join(" "));
++    }
++}
++
+ /// with ZAKURO_INTERP_STATS, how often each address ran in the interpreter,
+ /// the busiest printed when the system goes away.
+ static INTERPRETED: std::sync::Mutex<Option<std::collections::HashMap<u32, u64>>> = std::sync::Mutex::new(None);
+diff --git a/engine/core/src/loader.rs b/engine/core/src/loader.rs
+index 03f0d46..c9a4416 100644
+--- a/engine/core/src/loader.rs
++++ b/engine/core/src/loader.rs
+@@ -286,6 +286,19 @@ fn map_code(system: &mut System, title: &Title) -> Result<(), LoadError> {
+         log::debug!("mapped .bss at 0x{bss_start:08X}, 0x{bss_size:X} bytes");
+     }
+ 
++    // code mods such as Ocarina ReFramed grow .bss in the exheader and put
++    // their own code in the code image past .data, as the console's loader
++    // and Azahar copy the whole image: those bytes go where they land.
++    let data_offset = ((exheader.text.num_pages + exheader.rodata.num_pages) * PAGE_SIZE) as usize;
++    let data_end = data_offset + exheader.data.size as usize;
++    if code.len() > data_end && bss_end > bss_start {
++        let room = (bss_end - (exheader.data.address + exheader.data.size)) as usize;
++        let extra = &code[data_end..code.len().min(data_end + room)];
++        let at = exheader.data.address + exheader.data.size;
++        system.memory.write_bytes(at, extra);
++        log::info!("the code image runs 0x{:X} bytes past .data, copied into .bss at 0x{at:08X}", extra.len());
++    }
++
+     Ok(())
+ }
+ 
+diff --git a/engine/core/src/services/fs.rs b/engine/core/src/services/fs.rs
+index f0695f6..ad848d4 100644
+--- a/engine/core/src/services/fs.rs
++++ b/engine/core/src/services/fs.rs
+@@ -1062,6 +1062,7 @@ fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
+         SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
+             let romfs = title.romfs.as_ref()?;
+             let size = title.ncch.romfs_size.saturating_sub(0x1000);
++            let size = romfs_patch(system.config.data_dir.as_deref()).map_or(size, |patch| size.max(patch.end));
+             let backing = FileBacking::RomImage {
+                 offset: romfs.base,
+                 size,
+@@ -1090,6 +1091,72 @@ fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
+     }
+ }
+ 
++/// changes to the title's RomFS, from romfs.patch in the data directory, as
++/// mods replacing files need: the image's bytes with pieces written over
++/// them, past its end too, at offsets from the RomFS's level 3. the file is
++/// "PNRP", a u32 count, then each piece's u64 offset, u32 length and bytes;
++/// tools/romfs_patch.py makes it from the files to replace.
++pub struct RomFsPatch {
++    pieces: Vec<(u64, Vec<u8>)>,
++    /// where the last piece ends, the RomFS's size at least.
++    pub end: u64,
++}
++
++impl RomFsPatch {
++    fn parse(bytes: &[u8]) -> Option<RomFsPatch> {
++        let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
++        if bytes.get(..4)? != b"PNRP" {
++            return None;
++        }
++        let (mut pieces, mut at, mut end) = (Vec::new(), 8, 0);
++        for _ in 0..u32_at(4)? {
++            let offset = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
++            let length = u32_at(at + 8)? as usize;
++            let data = bytes.get(at + 12..at + 12 + length)?.to_vec();
++            end = end.max(offset + length as u64);
++            pieces.push((offset, data));
++            at += 12 + length;
++        }
++        Some(RomFsPatch { pieces, end })
++    }
++
++    /// count bytes at offset in the RomFS, start in the image.
++    fn read(&self, image: &[u8], start: usize, offset: u64, count: usize) -> Vec<u8> {
++        let mut data = vec![0u8; count];
++        let have = image.len().saturating_sub(start).min(count);
++        if have > 0 {
++            data[..have].copy_from_slice(&image[start..start + have]);
++        }
++        let end = offset + count as u64;
++        for (at, piece) in &self.pieces {
++            let piece_end = at + piece.len() as u64;
++            if *at < end && offset < piece_end {
++                let from = offset.max(*at);
++                let to = end.min(piece_end);
++                data[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&piece[(from - at) as usize..(to - at) as usize]);
++            }
++        }
++        data
++    }
++}
++
++/// the RomFS patch in the data directory, read once.
++pub fn romfs_patch(data_dir: Option<&std::path::Path>) -> Option<&'static RomFsPatch> {
++    static PATCH: std::sync::OnceLock<Option<RomFsPatch>> = std::sync::OnceLock::new();
++    PATCH
++        .get_or_init(|| {
++            let path = data_dir?.join("romfs.patch");
++            let bytes = std::fs::read(&path).ok()?;
++            let patch = RomFsPatch::parse(&bytes);
++            match &patch {
++                Some(patch) => log::info!("fs: RomFS patched by {}, {} pieces, up to 0x{:X}", path.display(), patch.pieces.len(), patch.end),
++                None => log::warn!("fs: {} is not a RomFS patch", path.display()),
++            }
++            patch
++        })
++        .as_ref()
++}
++
+ /// how long a read of length bytes takes on the console, in nanoseconds,
+ /// the numbers Citra measured reading a game card on an Old 3DS. titles
+ /// that load on a worker thread count on their other threads getting
+@@ -1138,9 +1205,21 @@ fn read_file(system: &mut System, file_id: u32, offset: u64, size: u32, dest: u3
+                 return 0;
+             };
+             let start = (base + offset) as usize;
+-            let Some(slice) = title.image().data().get(start..start + count) else {
+-                log::warn!("fs: read past the end of the ROM image");
+-                return 0;
++            let patch = (file.path == "romfs:/").then(|| romfs_patch(system.config.data_dir.as_deref())).flatten();
++            let image = title.image().data();
++            let patched;
++            let slice = match patch {
++                Some(patch) => {
++                    patched = patch.read(image, start, offset, count);
++                    &patched[..]
++                }
++                None => match image.get(start..start + count) {
++                    Some(slice) => slice,
++                    None => {
++                        log::warn!("fs: read past the end of the ROM image");
++                        return 0;
++                    }
++                },
+             };
+             // copying through a temporary keeps the borrow of title from
+             // overlapping the mutable borrow of memory.
+diff --git a/engine/gpu/src/lib.rs b/engine/gpu/src/lib.rs
+index 935b8ba..4436f99 100644
+--- a/engine/gpu/src/lib.rs
++++ b/engine/gpu/src/lib.rs
+@@ -22,6 +22,28 @@ pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
+ #[cfg(feature = "gles")]
+ pub use raster::gles::{compiling, compiling_stand_ins, preparing, skip_preparing, waited_draws, layout_scale, layout_size, note_compiler_crash, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_top_crop, set_window, stacked};
+ 
++/// the one-screen HUD: pieces of the bottom screen, left, top, width and
++/// height in its own pixels, each drawn over an area of the layout, while
++/// the layout shows the top screen alone (the game's hud.txt).
++static HUD: std::sync::RwLock<Vec<([i32; 4], [i32; 4])>> = std::sync::RwLock::new(Vec::new());
++
++/// sets the one-screen HUD's pieces, none to turn it off.
++pub fn set_hud(pieces: Vec<([i32; 4], [i32; 4])>) {
++    if let Ok(mut hud) = HUD.write() {
++        *hud = pieces;
++    }
++}
++
++/// the one-screen HUD's pieces.
++pub fn hud() -> Vec<([i32; 4], [i32; 4])> {
++    HUD.read().map(|hud| hud.clone()).unwrap_or_default()
++}
++
++/// whether the one-screen HUD has pieces to draw.
++pub fn hud_active() -> bool {
++    HUD.read().is_ok_and(|hud| !hud.is_empty())
++}
++
+ /// how the GPU reaches guest memory.
+ pub trait GpuMemory {
+     fn read(&mut self, addr: u32, out: &mut [u8]);
+@@ -355,6 +377,14 @@ pub struct Gpu {
+     pub bottom_full_rate: bool,
+     /// whether fast mode may skip the bottom screen's pictures at all.
+     pub skip_bottom: bool,
++    /// the layout shows no bottom screen: draws into its buffer are left out
++    /// one by one, even mixed with the top screen's.
++    pub bottom_hidden: bool,
++    /// a buffer whose draws were left out for the hidden bottom screen went
++    /// to the top screen once: no more of that.
++    bottom_hidden_wrong: bool,
++    /// draws left out for the hidden bottom screen since the last transfer.
++    hidden_skipped: u32,
+     /// in fast mode, the right eye's pictures of a title drawing both left
+     /// out, the panel showing the left eye alone. a right eye's picture is a
+     /// top one drawn into the buffer the left eye's just went out of, of top
+@@ -462,6 +492,9 @@ impl Gpu {
+             #[cfg(feature = "gles")]
+             panel: None,
+             skip_bottom: true,
++            bottom_hidden: false,
++            bottom_hidden_wrong: false,
++            hidden_skipped: 0,
+             skip_right_eye: true,
+             right_buffers: Vec::new(),
+             twins: Twins::default(),
+@@ -717,6 +750,13 @@ impl Gpu {
+                 self.resources.redrawn_bottom = (self.bottom_redraws >= 8).then_some((input, input_end as u32));
+             }
+         }
++        if shown_on == Some(0) && self.hidden_skipped > 0 && self.bottom_from.is_some_and(|(start, end)| (input as u64) < end as u64 && (start as u64) < input_end) {
++            log::info!("switch: hidden bottom screen skipping off, its buffer went to the top screen");
++            self.bottom_hidden_wrong = true;
++        }
++        if shown_on == Some(1) {
++            self.hidden_skipped = 0;
++        }
+         let from_skipped = self.skipped_targets.iter().any(|&(start, end)| {
+             let start_at = memory.translate(start) as u64;
+             (input as u64) < start_at + (end - start) as u64 && start_at < input_end
+@@ -1498,6 +1538,10 @@ impl Gpu {
+             log::info!("switch: bottom screen skipping back on");
+             self.bottom_held = false;
+         }
++        if screen == 1 && self.draws_hidden_bottom(memory) {
++            self.hidden_skipped = self.hidden_skipped.saturating_add(1);
++            return true;
++        }
+         if !self.drawing {
+             self.drawing = true;
+             // a picture is drawn after the most the frontend skips in a row,
+@@ -1559,6 +1603,21 @@ impl Gpu {
+         self.skipping
+     }
+ 
++    /// whether this draw goes into the buffer the bottom screen last showed
++    /// while the layout shows no bottom screen, in fast mode.
++    fn draws_hidden_bottom<M: GpuMemory>(&self, memory: &M) -> bool {
++        if !fast() || !self.bottom_hidden || self.bottom_hidden_wrong {
++            return false;
++        }
++        let Some((start, end)) = self.bottom_from else {
++            return false;
++        };
++        let dimensions = self.internal[REG_FRAMEBUFFER_DIMENSIONS];
++        let drawn = memory.translate(self.internal[REG_COLOR_BUFFER_ADDRESS] << 3);
++        let drawn_end = drawn.saturating_add((dimensions & 0x7FF) * (((dimensions >> 12) & 0x3FF) + 1) * 4);
++        drawn < end && start < drawn_end
++    }
++
+     /// in fast mode the bottom screen, which mostly stands still, is drawn
+     /// every other picture while its pictures change, every third while the
+     /// frontend has been skipping pictures to keep up, and one in six while
+diff --git a/engine/gpu/src/raster.rs b/engine/gpu/src/raster.rs
+index c4cb25e..71d0916 100644
+--- a/engine/gpu/src/raster.rs
++++ b/engine/gpu/src/raster.rs
+@@ -1810,6 +1810,10 @@ struct ColorTarget {
+     format: ColorFormat,
+     /// which of red, green, blue and alpha the draw may change.
+     write: [bool; 4],
++    /// with the scissor test excluding a rectangle, the rest of the area
++    /// past the first piece, as left, bottom, right, top: the GPU draws
++    /// the same draw again into each.
++    more: [Option<[i32; 4]>; 3],
+ }
+ 
+ /// what happened to the fragments of a draw, for tracing why a draw that
+@@ -2468,10 +2472,65 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
+         log::info!("a buffer drawn upside down, its dimensions' bit 24 clear, at {:08X}", registers[REG_COLOR_BUFFER_ADDRESS] << 3);
+     }
+     let (bottom, top) = ((viewport_y.round() as i32).max(0), viewport_top.min(buffer_height as i32));
++    let (mut left, mut right) = ((viewport_x.round() as i32).max(0), viewport_right.min(buffer_width as i32));
++    let mut excluded: [Option<[i32; 4]>; 3] = [None; 3];
++    let (mut bottom, mut top) = (bottom, top);
++    // the scissor test, GPUREG_SCISSORTEST_MODE/POS/DIM: in include mode
++    // (3) only its rectangle is drawn, in buffer pixels as the viewport's,
++    // its far corner inside. Ocarina ReFramed replays the bottom screen's
++    // draws onto the top one cut down to pieces this way
++    match registers[REG_SCISSOR_MODE] & 3 {
++        3 => {
++            let (start, end) = (registers[REG_SCISSOR_MODE + 1], registers[REG_SCISSOR_MODE + 2]);
++            left = left.max((start & 0x3FF) as i32);
++            bottom = bottom.max((start >> 16 & 0x3FF) as i32);
++            right = right.min((end & 0x3FF) as i32 + 1).max(left);
++            top = top.min((end >> 16 & 0x3FF) as i32 + 1).max(bottom);
++            if std::env::var_os("ZAKURO_SCISSOR_LOG").is_some() {
++                log::info!("scissor in {}..{} x {}..{} vp {}..{} x {}..{} -> {left}..{right} x {bottom}..{top} target {target_addr:08X} {vertex_count}v",
++                    start & 0x3FF, end & 0x3FF, start >> 16 & 0x3FF, end >> 16 & 0x3FF,
++                    viewport_x.round() as i32, viewport_right, viewport_y.round() as i32, viewport_top);
++            }
++        }
++        1 => {
++            // everything but its rectangle: up to four pieces around it,
++            // the first the draw's own area, the others drawn again
++            let (start, end) = (registers[REG_SCISSOR_MODE + 1], registers[REG_SCISSOR_MODE + 2]);
++            let (x1, y1) = ((start & 0x3FF) as i32, (start >> 16 & 0x3FF) as i32);
++            let (x2, y2) = ((end & 0x3FF) as i32 + 1, (end >> 16 & 0x3FF) as i32 + 1);
++            let (ex1, ex2, ey1, ey2) = (x1.max(left), x2.min(right), y1.max(bottom), y2.min(top));
++            if std::env::var_os("ZAKURO_SCISSOR_LOG").is_some() {
++                log::info!("scissor out {x1}..{x2} x {y1}..{y2} vp {left}..{right} x {bottom}..{top} target {target_addr:08X} {vertex_count}v");
++            }
++            if ex1 < ex2 && ey1 < ey2 {
++                let pieces = [
++                    [left, bottom, right, ey1],
++                    [left, ey2, right, top],
++                    [left, ey1, ex1, ey2],
++                    [ex2, ey1, right, ey2],
++                ];
++                let mut kept = pieces.into_iter().filter(|[l, b, r, t]| l < r && b < t);
++                match kept.next() {
++                    Some([l, b, r, t]) => (left, bottom, right, top) = (l, b, r, t),
++                    None => right = left,
++                }
++                for (slot, piece) in excluded.iter_mut().zip(kept) {
++                    *slot = Some(piece);
++                }
++            }
++        }
++        _ => {}
++    }
+     let (bottom, top) = match flip {
+         Some(_) => (buffer_height as i32 - top, buffer_height as i32 - bottom),
+         None => (bottom, top),
+     };
++    let more = excluded.map(|piece| {
++        piece.map(|[l, b, r, t]| match flip {
++            Some(_) => [l, buffer_height as i32 - t, r, buffer_height as i32 - b],
++            None => [l, b, r, t],
++        })
++    });
+ 
+     // draws are far more frequent than fills or transfers (thousands per
+     // second versus dozens), so this stays at trace level to keep debug
+@@ -2523,14 +2582,15 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
+     let state = DrawState {
+         target: ColorTarget {
+             addr: target_addr,
+-            left: (viewport_x.round() as i32).max(0),
++            left,
+             bottom,
+-            right: viewport_right.min(buffer_width as i32),
++            right,
+             top,
+             buffer_width,
+             buffer_height,
+             format: target_format,
+             write: std::array::from_fn(|channel| color_writable && color_mask & (1 << channel) != 0),
++            more,
+         },
+         depth_map: DepthMap::read(registers),
+         depth_stencil: DepthStencil::read(registers, memory),
+@@ -2612,7 +2672,13 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
+             let mut draw = state.hardware(registers, host::Geometry::Shaded(&shading));
+             draw.small = small;
+             match hardware.draw(memory, &draw) {
+-                Ok(()) => return (indices.len() / 3) as u32,
++                Ok(()) => {
++                    for piece in state.target.more.iter().flatten() {
++                        draw.scissor = *piece;
++                        let _ = hardware.draw(memory, &draw);
++                    }
++                    return (indices.len() / 3) as u32;
++                }
+                 Err(_) if fetched.is_some() => return NOT_FETCHED,
+                 Err(error) if error == gles::COMPILING && skippable => {
+                     gles::WAITED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+@@ -2689,7 +2755,13 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
+             draw.skippable = skippable;
+             draw.small = small;
+             match hardware.draw(memory, &draw) {
+-                Ok(()) => return triangle_count as u32,
++                Ok(()) => {
++                    for piece in state.target.more.iter().flatten() {
++                        draw.scissor = *piece;
++                        let _ = hardware.draw(memory, &draw);
++                    }
++                    return triangle_count as u32;
++                }
+                 Err(error) if first_time(&error) => log::error!("the GPU could not draw, {error}, drawing in software"),
+                 Err(_) => {}
+             }
+diff --git a/engine/gpu/src/raster/gles.rs b/engine/gpu/src/raster/gles.rs
+index 7d6da66..a57f269 100644
+--- a/engine/gpu/src/raster/gles.rs
++++ b/engine/gpu/src/raster/gles.rs
+@@ -2983,22 +2983,22 @@ impl Gles {
+                 }
+                 Err(error) => {
+                     // the driver out of memory, most likely: the next draw
+-                    // that needs it tries again once room is made
++                    // that needs it tries again once room is made. not when
++                    // it said nothing: Mali's linker fails a long program
++                    // now and then with an empty log, and letting go of
++                    // every texture and program for it flickers the screen
++                    let silent = error.trim_end().ends_with(',');
+                     if error != REFUSED {
+                         log::warn!("{error}");
+-                        if self.retried.insert(key.clone()) {
++                        if !silent && self.retried.insert(key.clone()) {
+                             self.make_room();
+                             continue;
+                         }
+                     }
++                    // only this program's draws go to the CPU: its vertex
++                    // program stays on the GPU for the others, where Link's
++                    // 3674-line one linked with other colour programs
+                     self.inputs.remove(&key);
+-                    if key.3 != 0 {
+-                        for translation in self.translated.values_mut() {
+-                            if *translation == Some(key.3) {
+-                                *translation = None;
+-                            }
+-                        }
+-                    }
+                     self.compiler.as_mut().expect("the compiler is still there").failed.insert(key, error);
+                 }
+             }
+@@ -3827,11 +3827,24 @@ impl Gles {
+                         let up = |length: u32| self.up(length) as i32;
+                         let screen = [up(screen.rows.1), up(screen.columns), up(s.height), up(screen.rows.0)];
+                         let top = index == 0;
++                        // the bottom screen with no area of its own: only its
++                        // pieces for the one-screen HUD, each the whole screen
++                        // scaled and placed so the piece lands on its area
++                        if !top && area[2] == 0 {
++                            for ([sx, sy, sw, sh], [dx, dy, dw, dh]) in crate::hud() {
++                                let (kx, ky) = (dw as f32 / sw.max(1) as f32, dh as f32 / sh.max(1) as f32);
++                                let whole = [dx - (sx as f32 * kx).round() as i32, dy - (sy as f32 * ky).round() as i32, (320.0 * kx).round() as i32, (240.0 * ky).round() as i32];
++                                parts.push(Part::Surface { texture: s.texture, screen, area: whole, smooth: smooth && self.scaled(), top: false, picture: None, clip: Some([dx, dy, dw, dh]) });
++                            }
++                            continue;
++                        }
+                         // the bottom screen too once it is drawn bigger, its pixels no longer the console's
+                         let smooth = smooth && (top || self.scaled());
+-                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth, top, picture: (interpolate && top).then_some(s.version) });
++                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth, top, picture: (interpolate && top).then_some(s.version), clip: None });
+                     }
+                 }
++                // the HUD's pieces come from the GPU's picture only
++                crate::PanelImage::Pixels(..) if area[2] == 0 => {}
+                 crate::PanelImage::Pixels(pixels, width, height) => parts.push(Part::Pixels { index, pixels, width, height, area, smooth: smooth && index == 0 }),
+             }
+         }
+@@ -4473,16 +4486,9 @@ impl Gles {
+                     exact = false;
+                     self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?
+                 }
+-                Err(error) => {
+-                    if vertex != 0 {
+-                        for translation in self.translated.values_mut() {
+-                            if *translation == Some(vertex) {
+-                                *translation = None;
+-                            }
+-                        }
+-                    }
+-                    return Err(error);
+-                }
++                // this program's draws alone are shaded on the CPU, see the
++                // compiler's results
++                Err(error) => return Err(error),
+             };
+             if same {
+                 let (_, last, last_program) = self.fragment.as_ref().expect("the last draw's");
+diff --git a/engine/gpu/src/raster/gles/display.rs b/engine/gpu/src/raster/gles/display.rs
+index 7a8d25d..574e4bf 100644
+--- a/engine/gpu/src/raster/gles/display.rs
++++ b/engine/gpu/src/raster/gles/display.rs
+@@ -811,7 +811,8 @@ impl Fit {
+ pub(super) enum Part {
+     Cursor { x: i32, y: i32 },
+     /// a screen's buffer, the top one's version when it is interpolated.
+-    Surface { texture: glow::Texture, screen: [i32; 4], area: [i32; 4], smooth: bool, top: bool, picture: Option<u64> },
++    /// clip, in the layout's pixels, keeps a piece of it only (the one-screen HUD).
++    Surface { texture: glow::Texture, screen: [i32; 4], area: [i32; 4], smooth: bool, top: bool, picture: Option<u64>, clip: Option<[i32; 4]> },
+     Pixels { index: usize, pixels: Vec<u8>, width: u32, height: u32, area: [i32; 4], smooth: bool },
+     Overlay(Arc<crate::Overlay>),
+ }
+@@ -1049,7 +1050,7 @@ pub(super) unsafe fn draw_parts(
+ ) -> Result<(), String> {
+             let framebuffer_height = height;
+             let bottom = parts.iter().find_map(|part| match part {
+-                Part::Surface { top: false, area, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
++                Part::Surface { top: false, area, clip: None, .. } | Part::Pixels { index: 1, area, .. } => Some(*area),
+                 _ => None,
+             });
+             for part in parts {
+@@ -1065,8 +1066,28 @@ pub(super) unsafe fn draw_parts(
+                         gl.disable(glow::SCISSOR_TEST);
+                         continue;
+                     }
+-                    Part::Surface { texture, screen, area, smooth, top, picture } => {
++                    Part::Surface { texture, screen, area, smooth, top, picture, clip: piece } => {
+                         let (area, clip) = cropped(fit.area(area), top, height);
++                        // a piece of the bottom screen for the one-screen HUD:
++                        // the whole screen placed so the piece lands on its
++                        // area, the rest scissored away
++                        if let Some(piece) = piece {
++                            let [x, y, w, h] = fit.area(piece);
++                            gl.use_program(Some(program));
++                            let gl_y = height - area[1] - area[3];
++                            gl.viewport(area[0], gl_y, area[2], area[3]);
++                            gl.uniform_4_i32(gl.get_uniform_location(program, "area").as_ref(), area[0], gl_y, area[2], area[3]);
++                            gl.uniform_4_i32(gl.get_uniform_location(program, "screen").as_ref(), screen[0], screen[1], screen[2], screen[3]);
++                            gl.uniform_1_i32(gl.get_uniform_location(program, "upright").as_ref(), 0);
++                            gl.uniform_1_i32(gl.get_uniform_location(program, "smooth_scale").as_ref(), smooth as i32);
++                            gl.bind_sampler(0, smooth.then_some(linear));
++                            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
++                            gl.enable(glow::SCISSOR_TEST);
++                            gl.scissor(x, height - y - h, w, h);
++                            gl.draw_arrays(glow::TRIANGLES, 0, 3);
++                            gl.disable(glow::SCISSOR_TEST);
++                            continue;
++                        }
+                         let step = match picture {
+                             Some(version) => panel.between.step((texture, version)),
+                             None => {
+diff --git a/engine/gpu/src/raster/gles/programs.rs b/engine/gpu/src/raster/gles/programs.rs
+index c2d2d59..2f7a296 100644
+--- a/engine/gpu/src/raster/gles/programs.rs
++++ b/engine/gpu/src/raster/gles/programs.rs
+@@ -588,7 +588,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
+     // one the driver turned down before isn't built again, the driver's own
+     // version in the saved copy's name
+     let refused = cached.map(|path| path.with_extension("refused"));
+-    if refused.as_deref().is_some_and(std::path::Path::exists) {
++    if refused.as_deref().is_some_and(|path| path.exists() || REFUSED_NOW.lock().unwrap().contains(path)) {
+         return Err(REFUSED.to_owned());
+     }
+     let _compiling = compiler_lock();
+@@ -677,12 +677,24 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
+     }
+ }
+ 
++/// programs the driver turned down in this start for a reason that may
++/// pass, not built again until the next one.
++static REFUSED_NOW: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
++
+ /// remembers a program the driver turned down, so that the next starts
+-/// don't build it again, unless it was short of memory, which may pass.
++/// don't build it again, unless it was short of memory, which may pass, or
++/// the driver said nothing: Mali's linker fails a long program now and then
++/// with an empty log after linking it fine before, and a program kept from
++/// the GPU for good leaves its draws shaded on the CPU in every start after.
+ fn refuse(path: Option<&std::path::Path>, error: &str) {
+-    if let Some(path) = path.filter(|_| !error.to_lowercase().contains("memory")) {
+-        let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, error));
++    let Some(path) = path else { return };
++    let said = error.rsplit_once(", ").map_or(error, |(_, said)| said).trim();
++    if error.to_lowercase().contains("memory") || said.is_empty() {
++        log::warn!("the driver turned a program down without a lasting reason, it is tried again next start");
++        REFUSED_NOW.lock().unwrap().insert(path.to_path_buf());
++        return;
+     }
++    let _ = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, error));
+ }
+ 
+ /// a program for the compiler thread to make.
+diff --git a/engine/gpu/src/registers.rs b/engine/gpu/src/registers.rs
+index 7fb721c..c313f82 100644
+--- a/engine/gpu/src/registers.rs
++++ b/engine/gpu/src/registers.rs
+@@ -22,6 +22,8 @@ pub const REG_VIEWPORT_WIDTH: usize = 0x0041;
+ pub const REG_VIEWPORT_WIDTH_RECIPROCAL: usize = 0x0042;
+ pub const REG_VIEWPORT_HEIGHT: usize = 0x0043;
+ pub const REG_VIEWPORT_HEIGHT_RECIPROCAL: usize = 0x0044;
++/// GPUREG_SCISSORTEST_MODE, then its POS and DIM.
++pub const REG_SCISSOR_MODE: usize = 0x0065;
+ pub const REG_VIEWPORT_DEPTH_RANGE: usize = 0x004D;
+ pub const REG_VIEWPORT_DEPTH_NEAR: usize = 0x004E;
+ /// GPUREG_DEPTHMAP_ENABLE, 1 for a z-buffer, 0 for a w-buffer.
+diff --git a/frontend/src/hud.rs b/frontend/src/hud.rs
+new file mode 100644
+index 0000000..34d50b5
+--- /dev/null
++++ b/frontend/src/hud.rs
+@@ -0,0 +1,115 @@
++//! the one-screen HUD, from hud.txt in the game's data folder: pieces of the
++//! bottom screen drawn over the top screen's layout, buttons that touch a
++//! fixed point of the bottom screen, and a button that shows the bottom
++//! screen by itself, for games like Majora's Mask 3D whose bottom screen
++//! holds buttons played all the time.
++//!
++//! hud.txt, one line each, # for notes:
++//!   piece  SX SY SW SH  DX DY DW DH   the bottom screen's SX,SY,SW,SH (its
++//!                                     pixels, 320x240) over DX,DY,DW,DH of the
++//!                                     layout (640x480 on the R36S)
++//!   tap    KEY X Y                    KEY held touches the bottom screen at X,Y
++//!   swap   KEY                        KEY shows the bottom screen by itself, and
++//!                                     back; meanwhile the right stick moves the
++//!                                     touch cursor and R2 touches
++//! KEY: L2 R2 L3 R3 SELECT START A B X Y L1 R1 UP DOWN LEFT RIGHT
++
++use std::path::Path;
++
++use crate::input::{A, B, DOWN, L1, L2, L3, LEFT, R1, R2, R3, RIGHT, SELECT, START, UP, X, Y};
++
++#[derive(Default)]
++pub struct Hud {
++    pub pieces: Vec<([i32; 4], [i32; 4])>,
++    pub taps: Vec<(u16, (u16, u16))>,
++    pub swap: Option<u16>,
++}
++
++fn key(name: &str) -> Option<u16> {
++    Some(match name.to_ascii_uppercase().as_str() {
++        "L2" => L2,
++        "R2" => R2,
++        "L3" => L3,
++        "R3" => R3,
++        "SELECT" => SELECT,
++        "START" => START,
++        "A" => A,
++        "B" => B,
++        "X" => X,
++        "Y" => Y,
++        "L1" => L1,
++        "R1" => R1,
++        "UP" => UP,
++        "DOWN" => DOWN,
++        "LEFT" => LEFT,
++        "RIGHT" => RIGHT,
++        _ => return None,
++    })
++}
++
++impl Hud {
++    /// the HUD hud.txt describes, none without one.
++    pub fn load(path: &Path) -> Hud {
++        let Ok(text) = std::fs::read_to_string(path) else { return Hud::default() };
++        let hud = Hud::parse(&text);
++        log::info!("one-screen HUD from {}: {} pieces, {} taps, swap {}", path.display(), hud.pieces.len(), hud.taps.len(), hud.swap.is_some());
++        hud
++    }
++
++    pub fn parse(text: &str) -> Hud {
++        let mut hud = Hud::default();
++        for (number, line) in text.lines().enumerate() {
++            let line = line.split('#').next().unwrap_or("").trim();
++            let words: Vec<&str> = line.split_whitespace().collect();
++            let numbers = |from: usize| words[from..].iter().map(|word| word.parse::<i32>()).collect::<Result<Vec<_>, _>>().ok();
++            let fine = match words.as_slice() {
++                [] => true,
++                ["piece", ..] if words.len() == 9 => match numbers(1) {
++                    Some(n) => {
++                        hud.pieces.push(([n[0], n[1], n[2], n[3]], [n[4], n[5], n[6], n[7]]));
++                        true
++                    }
++                    None => false,
++                },
++                ["tap", name, ..] if words.len() == 4 => match (key(name), numbers(2)) {
++                    (Some(key), Some(n)) => {
++                        hud.taps.push((key, (n[0].clamp(0, 319) as u16, n[1].clamp(0, 239) as u16)));
++                        true
++                    }
++                    _ => false,
++                },
++                ["swap", name] => match key(name) {
++                    Some(key) => {
++                        hud.swap = Some(key);
++                        true
++                    }
++                    None => false,
++                },
++                _ => false,
++            };
++            if !fine {
++                log::warn!("hud.txt line {}: not understood, {line}", number + 1);
++            }
++        }
++        hud
++    }
++
++    /// whether the HUD claims a key, which then reaches the game no other way.
++    pub fn claims(&self, key: u16) -> bool {
++        self.swap == Some(key) || self.taps.iter().any(|(tap, _)| *tap == key)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reads_the_lines() {
++        let hud = Hud::parse("# notes\npiece 264 0 56 56  592 432 48 48\ntap L2 292 28\nswap select\nnonsense here\n");
++        assert_eq!(hud.pieces, vec![([264, 0, 56, 56], [592, 432, 48, 48])]);
++        assert_eq!(hud.taps, vec![(L2, (292, 28))]);
++        assert_eq!(hud.swap, Some(SELECT));
++        assert!(hud.claims(L2) && hud.claims(SELECT) && !hud.claims(R2));
++    }
++}
+diff --git a/frontend/src/lib.rs b/frontend/src/lib.rs
+index 22c3a93..2abc9d9 100644
+--- a/frontend/src/lib.rs
++++ b/frontend/src/lib.rs
+@@ -18,6 +18,7 @@
+ mod busy;
+ mod crash;
+ mod font;
++mod hud;
+ pub mod input;
+ mod keyboard;
+ mod layout;
+@@ -124,6 +125,10 @@ pub fn run(mut args: Vec<String>) {
+     let data = PathBuf::from(std::env::var_os("ZAKURO_DATA").unwrap_or_else(|| ".".into()));
+     let game_path = data.join("settings.toml");
+     let mut game: GameSettings = settings::load(&game_path);
++    // the one-screen HUD, where the game has a hud.txt
++    let hud = hud::Hud::load(&data.join("hud.txt"));
++    zakuro_gpu::set_hud(hud.pieces.clone());
++    let hud_on = !hud.pieces.is_empty() || !hud.taps.is_empty() || hud.swap.is_some();
+     let profile = profile::find(&profile::titles_dir(), title_id_of(&path)).unwrap_or_default();
+     let advanced = Advanced::of(&game, &profile);
+     advanced.export();
+@@ -477,7 +482,11 @@ pub fn run(mut args: Vec<String>) {
+         }
+         // the right stick as the C-stick, L2 and R2 as ZL and ZR, which
+         // leaves tilting and touching to the cursor's way
+-        let c_stick = settings.right_stick == RightStick::CStick;
++        // under the one-screen HUD, the bottom screen shown by itself takes
++        // the touch cursor on the right stick and R2, to drag masks and items
++        let hud_top = hud_on && settings.layout == Layout::TopOnly && !settings.swapped;
++        let hud_bottom = hud_on && settings.layout == Layout::TopOnly && settings.swapped;
++        let c_stick = settings.right_stick == RightStick::CStick && !hud_bottom;
+         let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
+         let tilt = if keys.contains(&L2) && !c_stick {
+             (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
+@@ -509,7 +518,15 @@ pub fn run(mut args: Vec<String>) {
+             };
+             (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
+         }
++        // the HUD's swap key shows the bottom screen by itself, and back
++        if let Some(swap) = hud.swap.filter(|_| settings.layout == Layout::TopOnly) {
++            if !hotkey && keys.contains(&swap) && !held.contains(&swap) {
++                settings.swapped = !settings.swapped;
++            }
++        }
+         held = keys.clone();
++        // the keys the HUD claims reach the game no other way
++        let game_keys: HashSet<u16> = if hud_on && settings.layout == Layout::TopOnly { keys.iter().copied().filter(|key| !hud.claims(*key) || (hud_bottom && *key == R2)).collect() } else { keys.clone() };
+ 
+         let behind = match probe.as_mut() {
+             Some(probe) => probe.behind(),
+@@ -526,12 +543,14 @@ pub fn run(mut args: Vec<String>) {
+         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
+         let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
+         system.skip_frames(skip, unshown, most_skipped);
+-        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings, &game.buttons) };
++        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&game_keys, &axes, &settings, &game.buttons) };
+         let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
+         if c_stick && !hotkey {
+-            buttons.set(PadState::ZL, keys.contains(&L2));
+-            buttons.set(PadState::ZR, keys.contains(&R2));
++            buttons.set(PadState::ZL, game_keys.contains(&L2));
++            buttons.set(PadState::ZR, game_keys.contains(&R2));
+         }
++        // a HUD tap key held touches its point while the top screen is shown
++        let tapped = if hud_top && !hotkey { hud.taps.iter().find(|(key, _)| keys.contains(key)).map(|(_, point)| *point) } else { None };
+         let step = input::cursor_step(settings.touch_speed);
+         if c_stick || !keys.contains(&L2) {
+             let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
+@@ -564,7 +583,8 @@ pub fn run(mut args: Vec<String>) {
+         if probe.is_some() && script.is_empty() {
+             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
+         } else if script.is_empty() {
+-            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt, motion: motion.filter(|_| tilt == (0.0, 0.0)) });
++            let touch = tapped.or(touching.then_some((cursor.0 as u16, cursor.1 as u16)));
++            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch, tilt, motion: motion.filter(|_| tilt == (0.0, 0.0)) });
+         } else {
+             system.set_input(scripted_input(&script, frame_number));
+         }
+@@ -630,6 +650,10 @@ pub fn run(mut args: Vec<String>) {
+                 shown - counted_shown,
+                 busy.report()
+             );
++            log::info!("interpreted {:.2}% of the instructions", system.interpreted_share());
++            if logs % 6 == 5 {
++                zakuro_core::log_interpreted_busiest(16);
++            }
+             (counted_transfers, counted_top, counted_bottom, counted_shown) = (transfers, top, bottom, shown);
+             (counted, rendered, since) = (0, 0, Instant::now());
+             logs += 1;
+diff --git a/recompiler/src/codegen/a64.rs b/recompiler/src/codegen/a64.rs
+index 1884cc4..7dcb419 100644
+--- a/recompiler/src/codegen/a64.rs
++++ b/recompiler/src/codegen/a64.rs
+@@ -2133,6 +2133,21 @@ fn kind(op: u32) -> &'static str {
+ /// whether the function is worth translating: ARM code whose entry the
+ /// translator takes, with half its instructions or more.
+ pub fn worth(program: &Program, entry: u32, function: &Function, labels: &BTreeSet<u32>, functions: &BTreeMap<u32, String>, prefix: &str) -> bool {
++    // code a mod put past .data, and the title's functions branching into
++    // it, stay C: Ocarina ReFramed's hooks hand flags back and return past
++    // their call, which the C keeps right and this translation did not
++    if let Some(&(_, extra)) = program.text.holes.first() {
++        let into_mod = |at: &u32| {
++            program.text.read32(*at).is_some_and(|word| {
++                let branch = (word >> 25) & 7 == 0b101;
++                let offset = (((word & 0x00FF_FFFF) << 8) as i32 >> 6) as u32;
++                branch && at.wrapping_add(8).wrapping_add(offset) >= extra
++            })
++        };
++        if entry >= extra || function.instructions.iter().any(into_mod) {
++            return false;
++        }
++    }
+     let translated = coverage(program, entry, function, labels, functions, prefix);
+     // short of the 1 MiB conditional branches reach to the stubs past the end
+     translated > 0 && translated * 2 >= function.instructions.len() && function.instructions.len() <= 8_000
+@@ -2636,7 +2651,7 @@ mod tests {
+ 
+     fn alike(seed: u64, words: &[u32]) {
+         let program = Program {
+-            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
++            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(), holes: Vec::new() },
+             seeds: vec![(BASE, Source::Entry)],
+             slots: None,
+         };
+@@ -2877,7 +2892,7 @@ mod tests {
+         for seed in 0..programs {
+             let words = program(seed);
+             let at = |base: u32| Program {
+-                text: Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
++                text: Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(), holes: Vec::new() },
+                 seeds: vec![(base, Source::Entry)],
+                 slots: None,
+             };
+diff --git a/recompiler/src/codegen/mod.rs b/recompiler/src/codegen/mod.rs
+index c86fc28..9cb8dda 100644
+--- a/recompiler/src/codegen/mod.rs
++++ b/recompiler/src/codegen/mod.rs
+@@ -520,7 +520,7 @@ mod tests {
+         // bl BASE + 8, bx lr, bx lr
+         let words = [0xEB00_0000u32, 0xE12F_FF1E, 0xE12F_FF1E];
+         let program = Program {
+-            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
++            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(), holes: Vec::new() },
+             seeds: vec![(BASE, Source::Entry)],
+             slots: None,
+         };
+diff --git a/recompiler/src/cro.rs b/recompiler/src/cro.rs
+index e2f0e05..d21a6b7 100644
+--- a/recompiler/src/cro.rs
++++ b/recompiler/src/cro.rs
+@@ -177,7 +177,7 @@ impl Module {
+     pub fn program(&self, bytes: &[u8], imported: &[u32]) -> Option<Program> {
+         let segment = self.segments.iter().find(|s| s.kind == CODE && s.size > 0)?;
+         let range = segment.offset as usize..(segment.offset + segment.size) as usize;
+-        let mut text = image::Segment { base: segment.offset, bytes: bytes.get(range)?.to_vec() };
++        let mut text = image::Segment { base: segment.offset, bytes: bytes.get(range)?.to_vec(), holes: Vec::new() };
+ 
+         let mut seeds: Vec<_> = self.code_exports().into_iter().map(|address| (address, Source::Export)).collect();
+         seeds.extend(imported.iter().map(|&address| (address, Source::Import)));
+diff --git a/recompiler/src/discover.rs b/recompiler/src/discover.rs
+index 17fa00e..956c89e 100644
+--- a/recompiler/src/discover.rs
++++ b/recompiler/src/discover.rs
+@@ -281,7 +281,13 @@ impl Discovery<'_> {
+         }
+         let mut in_gap = false;
+         let mut address = self.text.base.next_multiple_of(4);
+-        while let Some(word) = self.text.read32(address) {
++        while address + 4 <= self.text.end() {
++            // no code in the segment's hole, where a mod's code past .data
++            // leaves the title's data out
++            let Some(word) = self.text.read32(address) else {
++                (in_gap, address) = (false, address + 4);
++                continue;
++            };
+             let offset = (address - self.text.base) as usize;
+             let unknown = self.analysis.map[offset..offset + 4].iter().all(|&byte| byte == Byte::Unknown);
+             if unknown && !self.analysis.functions.contains_key(&address) {
+@@ -612,7 +618,7 @@ mod tests {
+ 
+     fn program(words: &[u32]) -> Program {
+         Program {
+-            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() },
++            text: Segment { base: BASE, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(), holes: Vec::new() },
+             seeds: vec![(BASE, Source::Entry)],
+             slots: None,
+         }
+diff --git a/recompiler/src/image.rs b/recompiler/src/image.rs
+index eb536cb..3208974 100644
+--- a/recompiler/src/image.rs
++++ b/recompiler/src/image.rs
+@@ -10,6 +10,10 @@ const PAGE_SIZE: usize = 0x1000;
+ pub struct Segment {
+     pub base: u32,
+     pub bytes: Vec<u8>,
++    /// address ranges inside that hold no code, read as past the end: the
++    /// .rodata, .data and .bss between a title's text and code a mod put
++    /// past .data, and the long runs of zeros among that code.
++    pub holes: Vec<(u32, u32)>,
+ }
+ 
+ impl Segment {
+@@ -18,10 +22,17 @@ impl Segment {
+     }
+ 
+     pub fn contains(&self, address: u32) -> bool {
+-        address >= self.base && address < self.end()
++        address >= self.base && address < self.end() && !self.in_hole(address)
++    }
++
++    fn in_hole(&self, address: u32) -> bool {
++        self.holes.iter().any(|&(start, end)| address >= start && address < end)
+     }
+ 
+     pub fn read32(&self, address: u32) -> Option<u32> {
++        if self.in_hole(address) || self.in_hole(address + 3) {
++            return None;
++        }
+         let offset = address.checked_sub(self.base)? as usize;
+         let bytes = self.bytes.get(offset..offset + 4)?;
+         Some(u32::from_le_bytes(bytes.try_into().unwrap()))
+@@ -33,6 +44,9 @@ impl Segment {
+     }
+ 
+     pub fn read16(&self, address: u32) -> Option<u16> {
++        if self.in_hole(address) || self.in_hole(address + 1) {
++            return None;
++        }
+         let offset = address.checked_sub(self.base)? as usize;
+         let bytes = self.bytes.get(offset..offset + 2)?;
+         Some(u16::from_le_bytes(bytes.try_into().unwrap()))
+@@ -54,6 +68,9 @@ pub struct Image {
+     pub text: Segment,
+     pub rodata: Segment,
+     pub data: Segment,
++    /// where code a mod put past .data starts, when text runs on to it with
++    /// .rodata and .data zeroed in between.
++    pub extra: Option<u32>,
+ }
+ 
+ impl Image {
+@@ -68,14 +85,54 @@ impl Image {
+                 .get(offset..offset + info.size as usize)
+                 .unwrap_or_default()
+                 .to_vec(),
++            holes: Vec::new(),
+         };
+         let rodata_offset = header.text.num_pages as usize * PAGE_SIZE;
+         let data_offset = rodata_offset + header.rodata.num_pages as usize * PAGE_SIZE;
++        let mut text = segment(header.text, 0);
++        // code mods such as Ocarina ReFramed put their own code in the image
++        // past .data, which the loader copies into .bss: text runs on to the
++        // image's end for discovery to reach it, .rodata and .data zeroed,
++        // where the segments lie one after another as the image has them
++        let data_end = data_offset + header.data.size as usize;
++        let contiguous = header.rodata.address == header.text.address + rodata_offset as u32
++            && header.data.address == header.text.address + data_offset as u32;
++        // RECOMP_EXTRA=0 leaves a mod's code to the interpreter, to tell
++        // apart what the recompiled mod does differently
++        let wanted = std::env::var("RECOMP_EXTRA").map_or(true, |value| value != "0");
++        let extra = (wanted && contiguous && code.len() > data_end).then(|| {
++            let mut bytes = code.to_vec();
++            bytes[header.text.size as usize..data_end].fill(0);
++            let extra = header.text.address + data_end as u32;
++            let mut holes = vec![(header.text.address + header.text.size, extra)];
++            // zeros run on past a function's end as Thumb instructions:
++            // runs of 256 or more among the mod's code are its data
++            let mut run = None;
++            for (offset, &byte) in bytes.iter().enumerate().skip(data_end) {
++                match (byte, run) {
++                    (0, None) => run = Some(offset),
++                    (0, Some(_)) => {}
++                    (_, Some(start)) => {
++                        if offset - start >= 256 {
++                            holes.push((header.text.address + start as u32, header.text.address + offset as u32));
++                        }
++                        run = None;
++                    }
++                    _ => {}
++                }
++            }
++            if let Some(start) = run.filter(|&start| bytes.len() - start >= 256) {
++                holes.push((header.text.address + start as u32, header.text.address + bytes.len() as u32));
++            }
++            text = Segment { base: header.text.address, bytes, holes };
++            extra
++        });
+         Ok(Image {
+             entry: header.text.address,
+-            text: segment(header.text, 0),
++            text,
+             rodata: segment(header.rodata, rodata_offset),
+             data: segment(header.data, data_offset),
++            extra,
+         })
+     }
+ 
+@@ -105,7 +162,7 @@ mod tests {
+     const BASE: u32 = 0x0010_0000;
+ 
+     fn segment(base: u32, words: &[u32]) -> Segment {
+-        Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect() }
++        Segment { base, bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(), holes: Vec::new() }
+     }
+ 
+     #[test]
+@@ -115,6 +172,7 @@ mod tests {
+             text: segment(BASE, &[0xE12F_FF1E, 0x4770_4770, 0xE12F_FF1E]),
+             rodata: segment(0x0020_0000, &[BASE + 8, 12345]),
+             data: segment(0x0030_0000, &[BASE + 5]),
++            extra: None,
+         };
+         let program = image.into_program(&[], &[]);
+         assert_eq!(program.seeds.len(), 3);
+diff --git a/scripts/build.ps1 b/scripts/build.ps1
+index 2198812..4f872b5 100644
+--- a/scripts/build.ps1
++++ b/scripts/build.ps1
+@@ -99,7 +99,7 @@ foreach ($file in $Rom) {
+         $mounts += @("-v", "$(Split-Path -Parent $gameKeys):/keys:ro")
+         $arguments += "/keys/$(Split-Path -Leaf $gameKeys)"
+     }
+-    & $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work -e "PN_PRECACHE=$env:PN_PRECACHE" `
++    & $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work -e CARGO_NET_RETRY=10 -e CARGO_HTTP_MULTIPLEXING=false -e "PN_PRECACHE=$env:PN_PRECACHE" `
+         $image bash /src/scripts/container/inside.sh @arguments
+     if ($LASTEXITCODE -ne 0) { $failed += $file }
+ }
+diff --git a/scripts/device/run.sh b/scripts/device/run.sh
+index 565c485..191a8b3 100644
+--- a/scripts/device/run.sh
++++ b/scripts/device/run.sh
+@@ -10,6 +10,8 @@ data="$game/data"
+ mkdir -p "$data" "$dir/config"
+ 
+ export ZAKURO_FAST=1 ZAKURO_KMS=1 ZAKURO_DATA="$data" ZAKURO_RECOMPILED="$game/title.so" ZAKURO_SHADER_MANIFEST="$data/shaders.txt" ZAKURO_VERTEX_LIST="$game/vertex/vertex.txt"
++# the bottom screen not drawn while the layout leaves it out (Top only)
++export ZAKURO_HIDE_BOTTOM=1
+ export POCKET_NATIVE_TITLES="$dir/titles" POCKET_NATIVE_POWER="$dir/power.sh" POCKET_NATIVE_CONFIG="$dir/config"
+ # draws to leave out besides the game's options, as ZAKURO_DROP_DRAWS takes them
+ [ -f "$data/drops.txt" ] && export ZAKURO_DROP_DRAWS="$(cat "$data/drops.txt")"

@@ -1,3 +1,5 @@
 * text=auto
 *.sh text eol=lf
 *.toml text eol=lf
+*.patch -text
+config/hud.txt text eol=lf
