@@ -18,6 +18,10 @@ El juego ocupa la pantalla entera (640×384, sin deformar) y el HUD va en las fr
 Son recortes de la pantalla de abajo en vivo, así que todo lo que el juego dibuja ahí (objetos
 asignados, máscaras, cantidades) se ve tal cual.
 
+Cuando la pantalla de abajo muestra otra cosa (el título "Oprime Start", la selección de archivo, menús),
+el motor lo nota solo y pone **las dos pantallas** hasta que vuelve el HUD. En las escenas (pantalla de abajo
+en negro) se queda en una pantalla.
+
 ## Controles
 
 | Botón | Hace |
@@ -36,7 +40,7 @@ asignados, máscaras, cantidades) se ve tal cual.
 |---|---|
 | Termina, con Link controlable | **111–129 %** (30 fps) |
 | Escenas del bosque de la intro (Skull Kid) | 66–87 % (≈ 20–26 fps), límite de la GPU |
-| Primera vez: compilación de sombreados | se salta dibujos unos segundos; se guarda y no vuelve a pasar |
+| Primera vez: sombreados nuevos | cada uno tarda ~3 s en Mali y mientras falta ese dibujo (fondos o personajes que aparecen tarde); se guardan en disco y la siguiente vez ya no pasa |
 
 0 % de código interpretado, sin SVC faltantes, ~270 MiB de memoria.
 
