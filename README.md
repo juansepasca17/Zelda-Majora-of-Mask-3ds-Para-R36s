@@ -8,6 +8,18 @@ en tu PC a un programa nativo para la consola. Es el hermano del port de OoT3D
 **Este repo no trae nada del juego.** Necesitas tu propia copia desencriptada de
 Majora's Mask 3D **USA Rev 1 (v1.1)**, `CTR-P-AJRE`, Title ID `0004000000125500`.
 
+## Estado: terminado en la v5 ([release mm3d-v5](https://github.com/juansepasca17/Zelda-Majora-of-Mask-3ds-Para-R36s/releases/tag/mm3d-v5))
+
+| Versión | Qué agregó |
+|---|---|
+| v1 | El juego sin mods, dos pantallas, español |
+| v2 | HUD de una pantalla en el motor (`hud.txt`): recortes de la táctil, L2/R2 = I/II, Select = pantalla de abajo |
+| v3 | Dos pantallas automáticas en el título y la selección de archivo; tope de programas para Mali |
+| v4 | Precarga bajo el tope, reintento de rechazos de Mali, sin parpadeo al volver a una zona, una pantalla tras el primer HUD |
+| v5 | Precompilación de 481 sombreados en la primera carga ("Preparando sombreados"): sin zonas en negro ni parpadeos |
+
+Detalles y mediciones de cada versión en [docs/BITACORA.md](docs/BITACORA.md).
+
 ## Cómo se ve
 
 El juego ocupa la pantalla entera (640×384, sin deformar) y el HUD va en las franjas negras:
@@ -32,7 +44,11 @@ el motor pone **las dos pantallas**. Cuando aparece el HUD de juego por primera 
 | En esa vista: stick derecho + R2 | Mueve el cursor y toca o arrastra (para asignar máscaras y objetos) |
 | Stick derecho (en juego) | Cámara (Circle Pad Pro emulado) |
 | FN + R1 | Cambia a dos pantallas (arriba grande, abajo chica) y vuelve |
+| FN | Menú de Pocket Native |
+| FN + Start | Salir (mejor que el atajo del sistema, que cierra de golpe) |
 | El resto | Como en la 3DS |
+
+Guardar: en las estatuas de búho (la primera está en Ciudad Reloj Sur) o tocando la Canción del Tiempo.
 
 ## Rendimiento en la R36S (medido en la consola, probe con reloj fijo)
 
