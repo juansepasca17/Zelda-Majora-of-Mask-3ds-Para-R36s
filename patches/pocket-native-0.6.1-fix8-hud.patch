@@ -581,10 +581,52 @@ index c4cb25e..71d0916 100644
                  Err(_) => {}
              }
 diff --git a/engine/gpu/src/raster/gles.rs b/engine/gpu/src/raster/gles.rs
-index 7d6da66..c0f46ea 100644
+index 7d6da66..654ad0c 100644
 --- a/engine/gpu/src/raster/gles.rs
 +++ b/engine/gpu/src/raster/gles.rs
-@@ -2950,7 +2950,9 @@ impl Gles {
+@@ -83,6 +83,13 @@ const TEXTURE_KEEP_FLUSHES: u64 = 600;
+ /// of room.
+ const PROGRAM_KEEP_FLUSHES: u64 = 600;
+ 
++/// the most programs kept alive, ZAKURO_PROGRAM_CAP, 150 unless it says, 0
++/// for no cap: Mali's driver on the R36S turns links down past some 190.
++pub(super) fn program_cap() -> usize {
++    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    *CAP.get_or_init(|| std::env::var("ZAKURO_PROGRAM_CAP").ok().and_then(|cap| cap.parse().ok()).unwrap_or(150))
++}
++
+ /// batches a surface nothing drew into or read stays for, and how often the
+ /// ones past it are let go.
+ const SURFACE_KEEP_FLUSHES: u64 = 600;
+@@ -2922,7 +2929,12 @@ impl Gles {
+         if let Some(inputs) = inputs {
+             self.inputs.insert(key.clone(), inputs());
+         }
+-        if !wait {
++        // one with a saved copy on disk loads at once on the GL thread rather
++        // than on the compiler's, its draws not left out meanwhile: a place
++        // left and come back to flickered while the programs the cap let go
++        // came back
++        let saved = !self.preloading && cached.as_deref().is_some_and(|path| path.exists()) && compiler_idle();
++        if !wait && !saved {
+             if let Some(compiler) = self.compiler.as_mut() {
+                 compiler.pending.insert(key.clone());
+                 BUILDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+@@ -2940,7 +2952,12 @@ impl Gles {
+             return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait, None));
+         }
+         disturb();
+-        let program = match build_program(&self.gl, &compiled, &fragment, cached.as_deref()) {
++        let loading = std::time::Instant::now();
++        let built = build_program(&self.gl, &compiled, &fragment, cached.as_deref());
++        if saved && loading.elapsed() > std::time::Duration::from_millis(30) {
++            log::info!("a saved program took {} ms to load", loading.elapsed().as_millis());
++        }
++        let program = match built {
+             Ok(program) => program,
+             Err(error) if error != REFUSED && self.retried.insert(key.clone()) => {
+                 log::warn!("{error}");
+@@ -2950,7 +2967,9 @@ impl Gles {
              Err(error) => return Err(error),
          };
          self.programs.insert(key.clone(), program);
@@ -594,7 +636,7 @@ index 7d6da66..c0f46ea 100644
          Ok(Some(program))
      }
  
-@@ -2973,6 +2975,7 @@ impl Gles {
+@@ -2973,6 +2992,7 @@ impl Gles {
              match result {
                  Ok(program) => {
                      self.programs.insert(key.clone(), program);
@@ -602,7 +644,7 @@ index 7d6da66..c0f46ea 100644
                      self.note_program(&key);
                  }
                  Err(error) if error == SAVED => {}
-@@ -2983,26 +2986,27 @@ impl Gles {
+@@ -2983,26 +3003,27 @@ impl Gles {
                  }
                  Err(error) => {
                      // the driver out of memory, most likely: the next draw
@@ -639,7 +681,7 @@ index 7d6da66..c0f46ea 100644
          if self.compiler.as_ref().is_some_and(|compiler| compiler.pending.is_empty()) {
              if let Some(path) = self.precache_stamp.take() {
                  if let Err(error) = std::fs::write(&path, "") {
-@@ -3735,6 +3739,46 @@ impl Gles {
+@@ -3735,6 +3756,50 @@ impl Gles {
      /// textures, the vertex arrays kept on the GPU and the programs nothing
      /// drew with for a while, rather than every draw after it going to the
      /// CPU. Once a batch at most.
@@ -650,8 +692,7 @@ index 7d6da66..c0f46ea 100644
 +    /// Mask 3D's 3968-line vertex shader are alive. One let go and needed
 +    /// again comes back from its saved copy on disk, quickly.
 +    fn trim_programs(&mut self) {
-+        static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-+        let cap = *CAP.get_or_init(|| std::env::var("ZAKURO_PROGRAM_CAP").ok().and_then(|cap| cap.parse().ok()).unwrap_or(150));
++        let cap = program_cap();
 +        if cap == 0 || self.programs.len() <= cap {
 +            return;
 +        }
@@ -674,6 +715,11 @@ index 7d6da66..c0f46ea 100644
 +        }
 +        self.fragment = None;
 +        self.stamped = None;
++        // links Mali turned down without a word get another go now there is
++        // room, rather than their draws staying on the CPU, at 15 fps
++        if let Some(compiler) = self.compiler.as_mut() {
++            compiler.failed.retain(|_, error| !error.trim_end().ends_with(','));
++        }
 +        log::info!("{} programs alive over the cap of {cap}: letting go of the {} drawn with longest ago", self.programs.len() + gone.len(), gone.len());
 +        let gl = self.gl;
 +        self.worker.post_keeping(move || {
@@ -686,7 +732,7 @@ index 7d6da66..c0f46ea 100644
      fn make_room(&mut self) {
          if self.room_made == Some(self.flushes) {
              return;
-@@ -3827,11 +3871,24 @@ impl Gles {
+@@ -3827,11 +3892,24 @@ impl Gles {
                          let up = |length: u32| self.up(length) as i32;
                          let screen = [up(screen.rows.1), up(screen.columns), up(s.height), up(screen.rows.0)];
                          let top = index == 0;
@@ -712,7 +758,7 @@ index 7d6da66..c0f46ea 100644
                  crate::PanelImage::Pixels(pixels, width, height) => parts.push(Part::Pixels { index, pixels, width, height, area, smooth: smooth && index == 0 }),
              }
          }
-@@ -4473,16 +4530,9 @@ impl Gles {
+@@ -4473,16 +4551,9 @@ impl Gles {
                      exact = false;
                      self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?
                  }
@@ -785,11 +831,45 @@ index 7a8d25d..574e4bf 100644
                          let step = match picture {
                              Some(version) => panel.between.step((texture, version)),
                              None => {
+diff --git a/engine/gpu/src/raster/gles/prepare.rs b/engine/gpu/src/raster/gles/prepare.rs
+index 37a5b03..a7214d2 100644
+--- a/engine/gpu/src/raster/gles/prepare.rs
++++ b/engine/gpu/src/raster/gles/prepare.rs
+@@ -57,7 +57,15 @@ impl Gles {
+         let (mut translating, mut programs) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+         let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
+         let mut count = 0;
+-        for line in text.lines().skip(1) {
++        // only the newest under the program cap: the whole list, over 300 for
++        // Majora's Mask 3D, had Mali turn links down before the game began
++        let lines: Vec<&str> = text.lines().skip(1).collect();
++        let cap = super::program_cap();
++        let newest = if cap == 0 { 0 } else { lines.len().saturating_sub(cap * 2 / 3) };
++        if newest > 0 {
++            log::info!("preparing the newest {} of {} shaders, under the program cap of {cap}", lines.len() - newest, lines.len());
++        }
++        for line in lines[newest..].iter() {
+             let mut fields = line.split_whitespace();
+             let vertex = match fields.next() {
+                 Some("0") => 0,
 diff --git a/engine/gpu/src/raster/gles/programs.rs b/engine/gpu/src/raster/gles/programs.rs
-index c2d2d59..2f7a296 100644
+index c2d2d59..ff6640b 100644
 --- a/engine/gpu/src/raster/gles/programs.rs
 +++ b/engine/gpu/src/raster/gles/programs.rs
-@@ -588,7 +588,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
+@@ -214,6 +214,12 @@ pub(super) fn compilers() -> usize {
+ 
+ /// COMPILER_LOCK, held while compiling, unless several compiler threads
+ /// are asked for, which only works where the driver lets them all at it.
++/// whether nothing holds the compiler lock right now, for a quick load not
++/// to wait seconds behind a long link.
++pub(super) fn compiler_idle() -> bool {
++    compilers() != 1 || COMPILER_LOCK.try_lock().is_ok()
++}
++
+ pub(super) fn compiler_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+     (compilers() == 1).then(|| COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+ }
+@@ -588,7 +594,7 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
      // one the driver turned down before isn't built again, the driver's own
      // version in the saved copy's name
      let refused = cached.map(|path| path.with_extension("refused"));
@@ -798,7 +878,7 @@ index c2d2d59..2f7a296 100644
          return Err(REFUSED.to_owned());
      }
      let _compiling = compiler_lock();
-@@ -677,12 +677,24 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
+@@ -677,12 +683,24 @@ pub(super) fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, ca
      }
  }
  
@@ -973,7 +1053,7 @@ index 0000000..24b5ec7
 +    }
 +}
 diff --git a/frontend/src/lib.rs b/frontend/src/lib.rs
-index 22c3a93..6851b42 100644
+index 22c3a93..a3609f3 100644
 --- a/frontend/src/lib.rs
 +++ b/frontend/src/lib.rs
 @@ -18,6 +18,7 @@
@@ -995,11 +1075,11 @@ index 22c3a93..6851b42 100644
 +    let hud_on = !hud.pieces.is_empty() || !hud.taps.is_empty() || hud.swap.is_some();
 +    // both screens up while the bottom one shows a menu, and since when the
 +    // bottom screen has said otherwise
-+    let (mut auto_both, mut auto_since) = (false, Instant::now());
++    let (mut auto_both, mut auto_since, mut hud_found) = (false, Instant::now(), false);
      let profile = profile::find(&profile::titles_dir(), title_id_of(&path)).unwrap_or_default();
      let advanced = Advanced::of(&game, &profile);
      advanced.export();
-@@ -477,7 +486,27 @@ pub fn run(mut args: Vec<String>) {
+@@ -477,7 +486,35 @@ pub fn run(mut args: Vec<String>) {
          }
          // the right stick as the C-stick, L2 and R2 as ZL and ZR, which
          // leaves tilting and touching to the cursor's way
@@ -1007,8 +1087,16 @@ index 22c3a93..6851b42 100644
 +        // under the one-screen HUD, the bottom screen shown by itself takes
 +        // the touch cursor on the right stick and R2, to drag masks and items
 +        // a menu on the bottom screen (it shows neither the HUD nor black)
-+        // brings both screens up, a third of a second after it came
-+        if !hud.checks.is_empty() && settings.layout == Layout::TopOnly && !settings.swapped {
++        // brings both screens up, a third of a second after it came, until
++        // the HUD first shows: from then on one screen, Select for the other
++        // (in play the bottom screen changes for every talk with someone)
++        if !hud_found && zakuro_gpu::hud_seen() == 1 {
++            hud_found = true;
++            // nothing more to look for on the bottom screen
++            zakuro_gpu::set_hud_checks(Vec::new());
++            log::info!("one-screen HUD: the HUD showed, one screen from now on");
++        }
++        if !hud.checks.is_empty() && !hud_found && settings.layout == Layout::TopOnly && !settings.swapped {
 +            let want = match zakuro_gpu::hud_seen() {
 +                3 => true,
 +                1 | 2 => false,
@@ -1028,7 +1116,7 @@ index 22c3a93..6851b42 100644
          let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
          let tilt = if keys.contains(&L2) && !c_stick {
              (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
-@@ -509,7 +538,15 @@ pub fn run(mut args: Vec<String>) {
+@@ -509,7 +546,15 @@ pub fn run(mut args: Vec<String>) {
              };
              (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
          }
@@ -1044,7 +1132,7 @@ index 22c3a93..6851b42 100644
  
          let behind = match probe.as_mut() {
              Some(probe) => probe.behind(),
-@@ -526,12 +563,14 @@ pub fn run(mut args: Vec<String>) {
+@@ -526,12 +571,14 @@ pub fn run(mut args: Vec<String>) {
          let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
          let unshown = shown_only && as_played && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
          system.skip_frames(skip, unshown, most_skipped);
@@ -1062,7 +1150,7 @@ index 22c3a93..6851b42 100644
          let step = input::cursor_step(settings.touch_speed);
          if c_stick || !keys.contains(&L2) {
              let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
-@@ -564,7 +603,8 @@ pub fn run(mut args: Vec<String>) {
+@@ -564,7 +611,8 @@ pub fn run(mut args: Vec<String>) {
          if probe.is_some() && script.is_empty() {
              system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
          } else if script.is_empty() {
@@ -1072,7 +1160,7 @@ index 22c3a93..6851b42 100644
          } else {
              system.set_input(scripted_input(&script, frame_number));
          }
-@@ -630,6 +670,10 @@ pub fn run(mut args: Vec<String>) {
+@@ -630,6 +678,10 @@ pub fn run(mut args: Vec<String>) {
                  shown - counted_shown,
                  busy.report()
              );
@@ -1083,7 +1171,7 @@ index 22c3a93..6851b42 100644
              (counted_transfers, counted_top, counted_bottom, counted_shown) = (transfers, top, bottom, shown);
              (counted, rendered, since) = (0, 0, Instant::now());
              logs += 1;
-@@ -664,14 +708,15 @@ pub fn run(mut args: Vec<String>) {
+@@ -664,14 +716,15 @@ pub fn run(mut args: Vec<String>) {
                      status = now;
                  }
              }

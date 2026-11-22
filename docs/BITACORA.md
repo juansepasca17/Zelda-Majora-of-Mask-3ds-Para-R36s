@@ -60,3 +60,23 @@
 - Consola (`mm3d-v3-a`): 95 % de media, 0 omitidos; el log muestra negro → título (dos pantallas) → negro →
   menú → negro → HUD. Instalada (respaldos `pocket-native.v2` y `pocket-native.fix8`).
 - Falta: una partida larga del usuario para confirmar que ya no hay rechazos de Mali.
+
+## 2026-11-22 — segunda partida y v4
+
+- Partida de 4,5 min con la v3 (`mm3d-play-02`). El usuario: las dos pantallas en la intro le gustan, pero
+  hablar con un NPC también las ponía (la pantalla de abajo cambia en cada conversación); texturas que
+  parpadean al entrar, salir y volver a entrar.
+- Log:
+  - Al arrancar se precargaron los 313 sombreados del manifiesto: 262 programas vivos y **31 rechazos de Mali en
+    el mismo segundo**. El tope no actuó: durante la precarga todos cuentan como del lote actual.
+  - Los rechazados quedaban "fallidos" toda la sesión y se dibujaban por CPU: tramos a 15 fps con la GPU al 22 %
+    y el hilo de la GPU emulada al 60 %.
+  - Recortes del tope (39 programas) y, al volver a la zona, recarga en segundo plano: el parpadeo.
+- v4:
+  - La precarga toma solo los 2/3 del tope más recientes del manifiesto (100).
+  - Tras un recorte, los enlaces rechazados sin mensaje se olvidan y se reintentan.
+  - Un programa con copia en disco se carga al momento en el hilo GL (si el candado del compilador está libre;
+    si no, en segundo plano), sin dejar sus dibujos fuera. Se registra si tarda más de 30 ms.
+  - Dos pantallas automáticas solo hasta la primera vez que aparece el HUD; luego deja de mirar la pantalla de abajo.
+- Consola (`mm3d-v4-a`, manifiesto real de 406): "preparing the newest 100 of 406", 0 rechazos, 0 por CPU,
+  ninguna carga de más de 30 ms, 93 % (99 % de media en muestras, 299/300 cuadros). Instalada (respaldo `pocket-native.v3`).

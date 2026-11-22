@@ -18,9 +18,9 @@ El juego ocupa la pantalla entera (640×384, sin deformar) y el HUD va en las fr
 Son recortes de la pantalla de abajo en vivo, así que todo lo que el juego dibuja ahí (objetos
 asignados, máscaras, cantidades) se ve tal cual.
 
-Cuando la pantalla de abajo muestra otra cosa (el título "Oprime Start", la selección de archivo, menús),
-el motor lo nota solo y pone **las dos pantallas** hasta que vuelve el HUD. En las escenas (pantalla de abajo
-en negro) se queda en una pantalla.
+Al empezar, mientras la pantalla de abajo muestra el título ("Oprime Start") o la selección de archivo,
+el motor pone **las dos pantallas**. Cuando aparece el HUD de juego por primera vez pasa a una sola y ahí se queda
+(Select muestra la de abajo cuando la necesites).
 
 ## Controles
 
