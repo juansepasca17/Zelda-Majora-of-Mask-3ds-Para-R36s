@@ -46,13 +46,13 @@ el motor pone **las dos pantallas**. Cuando aparece el HUD de juego por primera 
 
 ## Instalación (con el release)
 
-1. **Compila tu ROM** con `PocketNative-kit-MM3D-v2.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
+1. **Compila tu ROM** con `PocketNative-kit-MM3D-v4.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\build.ps1 "C:\ruta\mm3d-usa-rev1.cci" -Out build -Precache
    ```
    Hace falta Docker Desktop abierto. Sale `build\Pocket Native\`.
 2. Copia `build\Pocket Native\` a `/roms/ports/` de la SD.
-3. Encima, copia `MM3D-UnaPantalla-R36S-v2.zip` (descomprimido): pone `hud.txt`, los ajustes
+3. Encima, copia `MM3D-UnaPantalla-R36S-v4.zip` (descomprimido): pone `hud.txt`, los ajustes
    (español, una pantalla) y el lanzador. Trae también el motor ya compilado, el mismo que sale del kit.
 
 Si ya tienes OoT3D fix8 en la SD: el motor nuevo sirve para los dos. Sin `hud.txt` se comporta
@@ -86,3 +86,9 @@ parches de ROM. Llevarlos a Pocket Native era mucho más trabajo que este HUD po
 ## Licencia
 
 MIT para lo de este repo. Pocket Native es MIT (fearkov, whovian).
+
+## Ideas para después
+
+- **Precompilar sombreados la primera vez.** Hoy cada sombreado se arma al verlo por primera vez (~3 s en Mali, esa parte no se
+  dibuja mientras tanto) y queda guardado. Una lista compartida no se puede publicar tal cual porque lleva programas de vértices
+  del juego: habría que hacer que el kit los saque de la ROM de cada uno y precompile la lista al primer arranque (unos 10 min).
