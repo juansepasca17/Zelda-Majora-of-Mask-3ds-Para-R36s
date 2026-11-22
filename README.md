@@ -40,19 +40,20 @@ el motor pone **las dos pantallas**. Cuando aparece el HUD de juego por primera 
 |---|---|
 | Termina, con Link controlable | **111–129 %** (30 fps) |
 | Escenas del bosque de la intro (Skull Kid) | 66–87 % (≈ 20–26 fps), límite de la GPU |
-| Primera vez: sombreados nuevos | cada uno tarda ~3 s en Mali y mientras falta ese dibujo (fondos o personajes que aparecen tarde); se guardan en disco y la siguiente vez ya no pasa |
+| Primera carga | pantalla **"Preparando sombreados"**: precompila 481 sombreados del juego (~20–25 min en una R36S nueva, B para saltar; lo que falte sigue la próxima vez). Así no hay zonas en negro ni parpadeos al jugar |
 
 0 % de código interpretado, sin SVC faltantes, ~270 MiB de memoria.
 
 ## Instalación (con el release)
 
-1. **Compila tu ROM** con `PocketNative-kit-MM3D-v4.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
+1. **Compila tu ROM** con `PocketNative-kit-MM3D-v5.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\build.ps1 "C:\ruta\mm3d-usa-rev1.cci" -Out build -Precache
    ```
-   Hace falta Docker Desktop abierto. Sale `build\Pocket Native\`.
+   Hace falta Docker Desktop abierto. **`-Precache` es importante:** el kit trae la lista de sombreados de Majora
+   (`titles/0004000000125500/shaders.txt`) y saca de tu ROM los programas de vértices que necesita. Sale `build\Pocket Native\`.
 2. Copia `build\Pocket Native\` a `/roms/ports/` de la SD.
-3. Encima, copia `MM3D-UnaPantalla-R36S-v4.zip` (descomprimido): pone `hud.txt`, los ajustes
+3. Encima, copia `MM3D-UnaPantalla-R36S-v5.zip` (descomprimido): pone `hud.txt`, los ajustes
    (español, una pantalla) y el lanzador. Trae también el motor ya compilado, el mismo que sale del kit.
 
 Si ya tienes OoT3D fix8 en la SD: el motor nuevo sirve para los dos. Sin `hud.txt` se comporta
@@ -67,7 +68,13 @@ fijos de la pantalla táctil. Formato en [config/hud.txt](config/hud.txt) y en
 
 Parches sobre Pocket Native 0.6.1 en [patches/](patches/):
 - `pocket-native-0.6.1-fix8-hud.patch`: todo (fix8 + HUD) sobre el ZIP original.
-- `hud-sobre-fix8.patch`: solo el HUD (6 archivos).
+- `hud-sobre-fix8.patch`: solo lo de Majora sobre fix8 (HUD, arreglos de Mali, aviso en español y la lista de sombreados).
+
+## La lista de sombreados
+
+[config/shaders.txt](config/shaders.txt) (481 líneas) es la lista para compartir que el kit armó (`3dsrecomp learn`) con lo que
+se jugó en la consola: solo claves de programas de vértices y números de configuración de la GPU, nada del juego. Al compilar con
+`-Precache`, el kit la cruza con tu ROM y deja `vertex/precache.txt`; el motor la precompila en la primera carga.
 
 ## Por qué no DekUI
 
@@ -77,7 +84,7 @@ parches de ROM. Llevarlos a Pocket Native era mucho más trabajo que este HUD po
 
 ## Carpetas
 
-- `config/`: `hud.txt` y ajustes del juego.
+- `config/`: `hud.txt`, ajustes del juego y la lista de sombreados.
 - `patches/`: cambios al motor.
 - `scripts/pc/`: pruebas sin pantalla en el PC (imagen `pn-run:1`).
 - `scripts/console/`: trabajos para el agente de pruebas por red de la consola (`PN Dev.sh`).
@@ -89,6 +96,5 @@ MIT para lo de este repo. Pocket Native es MIT (fearkov, whovian).
 
 ## Ideas para después
 
-- **Precompilar sombreados la primera vez.** Hoy cada sombreado se arma al verlo por primera vez (~3 s en Mali, esa parte no se
-  dibuja mientras tanto) y queda guardado. Una lista compartida no se puede publicar tal cual porque lleva programas de vértices
-  del juego: habría que hacer que el kit los saque de la ROM de cada uno y precompile la lista al primer arranque (unos 10 min).
+- La lista de sombreados sale de unas pocas horas de juego. Más partidas la harían más completa: con el kit, `-Precache` sobre
+  una carpeta ya jugada deja la lista nueva en `Pocket Native/shaders to share/`.

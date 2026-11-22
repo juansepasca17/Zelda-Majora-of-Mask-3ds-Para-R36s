@@ -80,3 +80,16 @@
   - Dos pantallas automáticas solo hasta la primera vez que aparece el HUD; luego deja de mirar la pantalla de abajo.
 - Consola (`mm3d-v4-a`, manifiesto real de 406): "preparing the newest 100 of 406", 0 rechazos, 0 por CPU,
   ninguna carga de más de 30 ms, 93 % (99 % de media en muestras, 299/300 cuadros). Instalada (respaldo `pocket-native.v3`).
+
+## 2026-11-22 — v5: precompilación en la primera carga
+
+- Partida corta con la v4 (`mm3d-play-04`): 0 rechazos, 0 por CPU, 96 %. Todas las partidas terminan sin la línea de
+  salida de `run.sh`: el usuario cierra con el atajo del sistema, no es un cuelgue.
+- El manifiesto de la consola ya tenía 759 sombreados de **solo 2 programas de vértices** (707 y 23 líneas). El grande es
+  idéntico a `2.pica`, que el kit saca de la romfs; `3dsrecomp learn` (con la carpeta `shaders.txt.vertex` al lado) los
+  reconoce a los dos y deja una lista para compartir de 481 líneas, sin datos del juego.
+- Esa lista va en el kit como `titles/0004000000125500/shaders.txt`; con `-Precache`, el kit escribe `vertex/precache.txt`
+  (481: 437 del programa grande, 15 del chico, 29 de función fija) y el motor la precompila al arrancar con la pantalla
+  "Preparando sombreados" (ahora en español), saltable con B, guardando cada programa sin dejarlo vivo.
+- Consola (`mm3d-v5-a`): 270 precompilados en 3,2 s (ya estaban guardados), 0 rechazos, 0 por CPU, 95 %. Instalada
+  (respaldos `pocket-native.v4` y `vertex.v4`). En una consola nueva serían unos 20–25 min la primera vez.
