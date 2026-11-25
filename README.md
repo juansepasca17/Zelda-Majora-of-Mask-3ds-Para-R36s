@@ -8,6 +8,8 @@ en tu PC a un programa nativo para la consola. Es el hermano del port de OoT3D
 **Este repo no trae nada del juego.** Necesitas tu propia copia desencriptada de
 Majora's Mask 3D **USA Rev 1 (v1.1)**, `CTR-P-AJRE`, Title ID `0004000000125500`.
 
+> **Cómo compilar y jugar, paso a paso: [docs/COMPILAR.md](docs/COMPILAR.md).**
+
 ## Estado: versión 1.0 ([release v1.0](https://github.com/juansepasca17/Zelda-Majora-of-Mask-3ds-Para-R36s/releases/tag/v1.0))
 
 Probada jugando en la consola: 0 rechazos de Mali, 0 dibujos por CPU, 96 % de velocidad media. La 1.0 es la v6 de la tabla.
