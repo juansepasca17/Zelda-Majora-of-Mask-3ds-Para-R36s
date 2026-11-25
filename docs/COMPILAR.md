@@ -17,15 +17,13 @@ copias a la SD lo que sale del PC. Se hace una vez (unos 30–60 min la primera 
 
 1. Descomprime `PocketNative-kit-MM3D-v1.0.zip`. Queda la carpeta `pocket-native-0.6.1`.
 2. Abre Docker Desktop y espera a *Engine running*.
-3. Abre PowerShell **en esa carpeta** y corre (cambia la ruta por la de tu ROM):
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File scripts\build.ps1 "C:\ruta\a\tu\mm3d.cci" -Out build -Precache
-   ```
-   En Linux: `scripts/build.sh /ruta/a/tu/mm3d.cci --out build --precache`.
-
-   **`-Precache` es importante.** Con él, el kit usa la lista de 2 891 sombreados de Majora
-   (`titles/0004000000125500/shaders.txt`) y saca de tu ROM lo que necesita para precompilarlos en la consola. Si
-   arrastras la ROM sobre `Build a game.bat`, eso **no** activa `-Precache`.
+3. **Arrastra tu ROM sobre `Build a game.bat`** (o haz doble clic y elígela). En este kit, ese `.bat` ya incluye la
+   precompilación de sombreados (`-Precache`): usa la lista de 2 891 sombreados de Majora
+   (`titles/0004000000125500/shaders.txt`) y saca de tu ROM lo que hace falta para precompilarlos en la consola.
+   - En Linux: doble clic en `Build a game.desktop`, o `scripts/build.sh /ruta/a/tu/mm3d.cci --out build --precache`.
+   - Por comando en Windows: `powershell -ExecutionPolicy Bypass -File scriptsuild.ps1 "C:uta\mm3d.cci" -Out build -Precache`.
+   - **No uses `Update Pocket Native`**: bajaría el Pocket Native original y borraría los arreglos del port (en este kit
+     solo muestra un aviso).
 4. La primera vez arma el contenedor (~2 GB de descarga) y Rust. Después: recompila el juego (~2 min) y lo compila
    (~2–7 min). Al final dice `done: copy "Pocket Native" into roms/ports on the handheld's card`.
 5. Resultado: `build\Pocket Native\`, con el lanzador `.sh` y la carpeta `pocket-native`. Comprueba que existe
