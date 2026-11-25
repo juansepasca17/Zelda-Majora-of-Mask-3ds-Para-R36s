@@ -21,7 +21,8 @@ copias a la SD lo que sale del PC. Se hace una vez (unos 30–60 min la primera 
    precompilación de sombreados (`-Precache`): usa la lista de 2 891 sombreados de Majora
    (`titles/0004000000125500/shaders.txt`) y saca de tu ROM lo que hace falta para precompilarlos en la consola.
    - En Linux: doble clic en `Build a game.desktop`, o `scripts/build.sh /ruta/a/tu/mm3d.cci --out build --precache`.
-   - Por comando en Windows: `powershell -ExecutionPolicy Bypass -File scriptsuild.ps1 "C:uta\mm3d.cci" -Out build -Precache`.
+   - Por comando en Windows: `powershell -ExecutionPolicy Bypass -File scripts\build.ps1 "C:\ruta\mm3d.cci" -Out build -Precache`.
+uta\mm3d.cci" -Out build -Precache`.
    - **No uses `Update Pocket Native`**: bajaría el Pocket Native original y borraría los arreglos del port (en este kit
      solo muestra un aviso).
 4. La primera vez arma el contenedor (~2 GB de descarga) y Rust. Después: recompila el juego (~2 min) y lo compila
