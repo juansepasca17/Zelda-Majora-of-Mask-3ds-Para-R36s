@@ -1,0 +1,8 @@
+name = "The Legend of Zelda: Majora's Mask 3D"
+
+# Casi todos los modelos usan un programa de vértices de 3968 líneas, y Majora combina más de
+# 1300 materiales con él: en Mali (R36S) cada programa enlazado entero tarda ~2,8 s, pero con las
+# dos mitades por separado el de vértices se enlaza una vez (5,7 s) y cada material nuevo solo su
+# fragmento (~0,4-0,55 s), lo que hace posible precompilar la lista entera.
+[advanced]
+separable_shaders = true

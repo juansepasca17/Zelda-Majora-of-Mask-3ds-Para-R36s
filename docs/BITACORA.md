@@ -93,3 +93,32 @@
   "Preparando sombreados" (ahora en español), saltable con B, guardando cada programa sin dejarlo vivo.
 - Consola (`mm3d-v5-a`): 270 precompilados en 3,2 s (ya estaban guardados), 0 rechazos, 0 por CPU, 95 %. Instalada
   (respaldos `pocket-native.v4` y `vertex.v4`). En una consola nueva serían unos 20–25 min la primera vez.
+
+## 2026-11-24/25 — v6: sombreados separables, cosecha por teletransporte y precarga completa
+
+- Partida de 33 min con la v5 (log en la SD): 0 rechazos, pero zonas negras al entrar a sitios nuevos. La lista de
+  la consola pasó de 1 731 a 2 281 líneas en esa partida (1 291 sombreados distintos); OoT3D tiene 259 en total.
+  Sin los registros de luces (0x140–0x1d9) quedarían 664; la iluminación genérica la descarta el propio menú
+  ("muy lenta en la R36S").
+- **Separables:** la prueba del 21-11 en la consola (`log_b-separables`) daba el dato clave: la mitad de vértices de
+  3 968 líneas tarda 5,7 s **una vez** y cada fragmento nuevo 0,4–0,55 s, contra 2,8–3,3 s del programa entero.
+  Aquella pasada salió peor solo porque las mitades no estaban guardadas. Activado para Majora en
+  `titles/0004000000125500/profile.toml`; opción "Separable shaders" en el menú avanzado para apagarlo.
+  - Memoria: al borrar un programa separable se libera su fragmento si nadie más lo usa; al precompilar, cada uno
+    queda solo en disco (no vivo en Mali).
+  - Carga inmediata de lo ya guardado también en separable (`fragment_stage_saved`).
+- **Teletransporte (`ZAKURO_WARP=desde:cada:entradas`, solo para el probe del PC):** contexto del juego en
+  `*(*0x72f5c0 + 0x16c)` (DekUI), `next_entrance` en `+0xC52E` (Project Restoration), disparador de transición `0x14` en
+  `+0xC529` y tipo en `+0xC533` (orden del PlayState de la decompilación de N64). Con la partida del usuario, entradas
+  `grupo << 9`: funciona (Ciudad Reloj Sur con `d800`, templos...). Tandas de 28 escenas con 500 cuadros cada una:
+  56 escenas recorridas (la tanda 0 se arruinó al editar su script en marcha; la 3 se colgó en `c800`).
+  `ZAKURO_WARP_TIME` fija la hora (datos de la partida en `0x7751D8`, hora en `+0x18`, noche en `+0x4`).
+- Lista para compartir: lo jugado + lo cosechado → `3dsrecomp learn` → 2 634 sombreados (el kit precompila hasta 2 000).
+- **Precarga completa** con la pantalla "Preparando sombreados"; si se salta con B, **sigue en segundo plano** de a uno,
+  solo con el compilador libre (lo que pide la zona actual va primero), con un aviso en la esquina:
+  "Preparando sombreados: faltan N (~M min)". Error encontrado y corregido: el reparto esperaba a que bajara la lista de
+  pendientes, que nadie vaciaba durante la pantalla de carga → se quedaba trabada.
+- **Piedra Sheikah:** mientras haya conversiones `y2r` (video), dos pantallas; 1,5 s después, una.
+- **Diagnóstico:** cada cambio de lo que muestra la pantalla de abajo deja una captura en `data/shots/` (máx. 30).
+- PC (Mesa), lista de 2 000, en frío: 1 022 preparados en 38,5 s; luego 14 400 cuadros con 167 dibujos omitidos
+  (antes >1 100) y 120 % en juego.
