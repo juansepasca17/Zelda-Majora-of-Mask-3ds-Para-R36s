@@ -8,7 +8,9 @@ en tu PC a un programa nativo para la consola. Es el hermano del port de OoT3D
 **Este repo no trae nada del juego.** Necesitas tu propia copia desencriptada de
 Majora's Mask 3D **USA Rev 1 (v1.1)**, `CTR-P-AJRE`, Title ID `0004000000125500`.
 
-## Estado: v6 ([release mm3d-v6](https://github.com/juansepasca17/Zelda-Majora-of-Mask-3ds-Para-R36s/releases/tag/mm3d-v6))
+## Estado: versión 1.0 ([release v1.0](https://github.com/juansepasca17/Zelda-Majora-of-Mask-3ds-Para-R36s/releases/tag/v1.0))
+
+Probada jugando en la consola: 0 rechazos de Mali, 0 dibujos por CPU, 96 % de velocidad media. La 1.0 es la v6 de la tabla.
 
 | Versión | Qué agregó |
 |---|---|
@@ -17,7 +19,7 @@ Majora's Mask 3D **USA Rev 1 (v1.1)**, `CTR-P-AJRE`, Title ID `0004000000125500`
 | v3 | Dos pantallas automáticas en el título y la selección de archivo; tope de programas para Mali |
 | v4 | Precarga bajo el tope, reintento de rechazos de Mali, sin parpadeo al volver a una zona, una pantalla tras el primer HUD |
 | v5 | Precompilación de 481 sombreados en la primera carga ("Preparando sombreados") |
-| v6 | Sombreados separables (cada uno nuevo ~6 veces más barato en Mali), lista de **2 891** (jugados + cosechados por teletransporte, de día y de noche), precarga que sigue en segundo plano con aviso "faltan N (~M min)", dos pantallas con el video de la piedra Sheikah |
+| v6 = **1.0** | Sombreados separables (cada uno nuevo ~6 veces más barato en Mali), lista de **2 891** (jugados + cosechados por teletransporte, de día y de noche), precarga que sigue en segundo plano con aviso "faltan N (~M min)", dos pantallas con el video de la piedra Sheikah |
 
 Detalles y mediciones de cada versión en [docs/BITACORA.md](docs/BITACORA.md).
 
@@ -64,14 +66,14 @@ Guardar: en las estatuas de búho (la primera está en Ciudad Reloj Sur) o tocan
 
 ## Instalación (con el release)
 
-1. **Compila tu ROM** con `PocketNative-kit-MM3D-v6.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
+1. **Compila tu ROM** con `PocketNative-kit-MM3D-v1.0.zip` (Pocket Native 0.6.1 + arreglos de fix8 + HUD):
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\build.ps1 "C:\ruta\mm3d-usa-rev1.cci" -Out build -Precache
    ```
    Hace falta Docker Desktop abierto. **`-Precache` es importante:** el kit trae la lista de sombreados de Majora
    (`titles/0004000000125500/shaders.txt`) y saca de tu ROM los programas de vértices que necesita. Sale `build\Pocket Native\`.
 2. Copia `build\Pocket Native\` a `/roms/ports/` de la SD.
-3. Encima, copia `MM3D-UnaPantalla-R36S-v6.zip` (descomprimido): pone `hud.txt`, los ajustes
+3. Encima, copia `MM3D-UnaPantalla-R36S-v1.0.zip` (descomprimido): pone `hud.txt`, los ajustes
    (español, una pantalla) y el lanzador. Trae también el motor ya compilado, el mismo que sale del kit.
 
 Si ya tienes OoT3D fix8 en la SD: el motor nuevo sirve para los dos. Sin `hud.txt` se comporta

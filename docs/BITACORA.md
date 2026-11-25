@@ -134,3 +134,9 @@
   que sumar a la lista el manifiesto nuevo de la consola (2 896 líneas) con `3dsrecomp learn`.
 - `data/shots`: lo que se marcaba como "otra cosa" durante charlas y escenas es **el HUD oscurecido** (el juego atenúa la
   pantalla de abajo). Para reactivar las dos pantallas automáticas en menús haría falta tratar el HUD oscurecido como HUD.
+
+## 2026-11-25 — versión 1.0
+
+La v6, probada por el usuario en la consola, se publica como **1.0** (mismos archivos, renombrados). Conocido y aceptado:
+algunas animaciones (Link poniéndose una máscara, una escena del Skull Kid) arman sus sombreados la primera vez (~0,35 s
+cada uno); quedan guardados y no se repiten.
