@@ -122,3 +122,15 @@
 - **Diagnóstico:** cada cambio de lo que muestra la pantalla de abajo deja una captura en `data/shots/` (máx. 30).
 - PC (Mesa), lista de 2 000, en frío: 1 022 preparados en 38,5 s; luego 14 400 cuadros con 167 dibujos omitidos
   (antes >1 100) y 120 % en juego.
+
+## 2026-11-25 — prueba de la v6 en la consola (usuario)
+
+- Opinión del usuario: "funciona de maravilla". Solo vio dibujos que faltaron un momento en la animación de Link
+  poniéndose una máscara y en una escena del Skull Kid.
+- Log (12 min): separables activos, la lista ya estaba precompilada de una sesión anterior del mismo día,
+  **0 rechazos, 0 dibujos por CPU, 96 %** de media (233/300 cuadros dibujados), 415 MiB.
+- 61 fragmentos nuevos (no estaban en la lista), mediana 354 ms, 47 de ellos entre las 18:08 y las 18:09 (~18 s):
+  la máscara y el Skull Kid. Quedan guardados en la consola, así que ahí no se repiten. Para otros jugadores habría
+  que sumar a la lista el manifiesto nuevo de la consola (2 896 líneas) con `3dsrecomp learn`.
+- `data/shots`: lo que se marcaba como "otra cosa" durante charlas y escenas es **el HUD oscurecido** (el juego atenúa la
+  pantalla de abajo). Para reactivar las dos pantallas automáticas en menús haría falta tratar el HUD oscurecido como HUD.
